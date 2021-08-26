@@ -22,7 +22,7 @@ class BPRMF:
         self.verbose = args.verbose
         self.c = args.c
         self.alpha = args.alpha
-        self.beta = args.beta
+        self.beta = args.beta        
         #placeholders
         self.users = tf.placeholder(tf.int32, shape = (None,))
         self.pos_items = tf.placeholder(tf.int32, shape = (None,))
@@ -324,6 +324,110 @@ class BPRMF:
             total_parameters += variable_parameters
         if self.verbose > 0:
             print("#params: %d" % total_parameters)
+
+
+class DynInfoMF:
+    def __init__(self, args, data_config):
+        self.n_users = data_config['n_users']
+        self.n_items = data_config['n_items']
+
+        self.decay = args.regs
+        self.emb_dim = args.embed_size
+        self.lr = args.lr
+        self.batch_size = args.batch_size
+        self.verbose = args.verbose
+        self.tau = args.tau
+        self.neg_sample=args.neg_sample
+        self.pop_partition_user=args.pop_partition_user
+        self.pop_partition_item=args.pop_partition_item
+
+
+        #placeholders
+        self.users = tf.placeholder(tf.int32, shape = (None,))
+        self.pos_items = tf.placeholder(tf.int32, shape = (None,))
+        self.neg_items = tf.placeholder(tf.int32, shape = (None,))
+
+        self.users_pop = tf.placeholder(tf.int32, shape = (None,))
+        self.pos_items_pop = tf.placeholder(tf.int32, shape = (None,))
+        self.neg_items_pop = tf.placeholder(tf.int32, shape = (None,))
+
+        #initiative weights
+        self.weights = self.init_weights()
+
+        #neting
+        user_embedding = tf.nn.embedding_lookup(self.weights['user_embedding'], self.users)
+        pos_item_embedding = tf.nn.embedding_lookup(self.weights['item_embedding'], self.pos_items)
+        neg_item_embedding = tf.nn.embedding_lookup(self.weights['item_embedding'], self.neg_items)
+
+        user_pop_embedding = tf.nn.embedding_lookup(self.weights['user_pop_embedding'], self.users_pop)
+        pos_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.pos_items_pop)
+        neg_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.neg_items_pop)
+
+
+        self.mf_loss1, self.mf_loss2, self.reg_loss = self.create_dyninfonce_loss(user_embedding, pos_item_embedding, neg_item_embedding, user_pop_embedding, pos_item_pop_embedding,neg_item_pop_embedding)
+
+        self.loss = self.mf_loss1 + self.mf_loss2 + self.reg_loss
+
+        # self.opt = tf.train.RMSPropOptimizer(learning_rate = self.lr).minimize(self.loss)
+        trainable_v1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'parameter')
+        self.opt = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss, var_list = trainable_v1)
+
+        self._statistics_params()
+
+
+
+
+    def init_weights(self):
+        weights = dict()
+        self.initializer = tf.contrib.layers.xavier_initializer()
+        initializer = self.initializer
+        with tf.variable_scope('parameter'):
+            weights["user_pop_embedding"] = tf.Variable(initializer([self.pop_partition_user, self.emb_dim]), name = 'user_pop_embedding')
+            weights["item_pop_embedding"] = tf.Variable(initializer([self.pop_partition_item, self.emb_dim]), name = 'item_pop_embedding')
+            weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name = 'user_embedding')
+            weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name = 'item_embedding')
+
+        return weights
+
+    
+    def create_dyninfonce_loss(self, users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop):
+        tiled_usr=tf.reshape(tf.tile(users,[1,self.neg_sample]),[-1,self.emb_dim])
+        tiled_usr_pop=tf.reshape(tf.tile(users_pop,[1,self.neg_sample]),[-1,self.emb_dim])
+        pos_item_score=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)
+        neg_item_score=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)
+        pos_item_pop_score=tf.reduce_sum(tf.multiply(users_pop,pos_items_pop),axis=1)
+        neg_item_pop_score=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
+
+        neg_item_pop_score_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_pop_score,[-1,self.neg_sample])),axis=1)
+        pos_item_pop_score_exp=tf.exp(pos_item_score)
+        loss2=tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
+
+        weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_score))/self.tau
+        weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_score))/self.tau
+        neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
+        pos_item_score_exp=tf.exp(weighted_pos_item_score)
+        loss1=tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
+
+        regularizer1 = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
+        regularizer1 = regularizer1/self.batch_size
+
+        regularizer2=  tf.nn.l2_loss(users_pop) + tf.nn.l2_loss(pos_items_pop) + tf.nn.l2_loss(neg_items_pop)
+        reg_loss = self.decay * (regularizer1+regularizer2)
+
+        return loss1, loss2, reg_loss
+
+    def _statistics_params(self):
+        # number of params
+        total_parameters = 0
+        for variable in self.weights.values():
+            shape = variable.get_shape()  # shape is an array of tf.Dimension
+            variable_parameters = 1
+            for dim in shape:
+                variable_parameters *= dim.value
+            total_parameters += variable_parameters
+        if self.verbose > 0:
+            print("#params: %d" % total_parameters)
+
 
 
 class BIASMF:

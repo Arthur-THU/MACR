@@ -504,7 +504,7 @@ class Data():
     def __init__(self, args):
         self.path = args.data_path + args.dataset + '/'
         self.batch_size = args.batch_size
-
+        self.neg_sample=args.neg_sample
         self.n_users, self.n_items, self.n_valid = 0, 0, 0
         self.n_train, self.n_test = 0, 0
         self.user_list = []
@@ -536,7 +536,36 @@ class Data():
             sum += len(users)
         print("sparsity:", 1.0*sum/self.n_items/self.n_users)
 
-        
+    #TODO: determine the popularity one-hot scheme
+
+    def sample_infonce(self):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
+
+        pos_items, neg_items = [], []
+
+        for user in users:
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                pos_items.append(rd.choice(self.train_user_list[user]))
+            cnt=0
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user]:
+                    neg_items.append(neg_item)
+                    cnt+=1
+                    if cnt==self.neg_sample:
+                        break
+
+        for i in range(len(users)):
+            if pos_items[i] >= self.n_items:
+                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
+                    neg_items[p] += self.n_items
+
+        return users, pos_items, neg_items
         
 
 

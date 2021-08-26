@@ -4,7 +4,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run pop_bias.")
     parser.add_argument('--data_path', nargs='?', default='./data/',
                         help='Input data path.')
-    parser.add_argument('--dataset', nargs='?', default='movielens_ml_1m',
+    parser.add_argument('--dataset', nargs='?', default='addressa',
                         help='Choose a dataset')
     parser.add_argument('--source', nargs='?', default='normal',
     help='normal | dice')
@@ -87,6 +87,15 @@ def parse_args():
     parser.add_argument('--end', type=float, default=1.,
                         help='check c end.')
     parser.add_argument('--step', type=int, default=20,
-                        help='check c step.')      
-    parser.add_argument('--out', type=int, default=0)                      
+                        help='check c step.')
+    
+    #new args
+    parser.add_argument('--neg_sample', type=int, default=10,
+                        help='negative sample ratio.')    
+    parser.add_argument('--tau', type=int, default=1,
+                        help='temperature parameter, should be equal or greater than 1.')
+    parser.add_argument('--pop_partition_user', type=int, default=100, 
+                        help='# of user popularity partition, -1 to set to max')  
+    parser.add_argument('--pop_partition_item', type=int, default=100, 
+                        help='# of item popularity partitions, -1 to set to max')                    
     return parser.parse_args()
