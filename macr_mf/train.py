@@ -10,7 +10,7 @@ import logging
 from time import time
 import multiprocessing
 from scipy.special import softmax, expit
-from model import BPRMF, CausalE, IPS_BPRMF, BIASMF
+from model import BPRMF, CausalE, IPS_BPRMF, BIASMF, DYNMF
 from batch_test import *
 from matplotlib import pyplot as plt
 
@@ -363,6 +363,10 @@ if __name__ == '__main__':
         model_type = 'mf'
         model = BIASMF(args, config)
         print('BIASMF model.')
+    elif args.model == "dynmf":
+        model_type = 'dynmf'
+        model=DYNMF(args,config,data.user_pop_num,data.item_pop_num)
+        print('DYNMF model')
 
     vars_to_restore = []
     for var in tf.trainable_variables():
@@ -450,8 +454,8 @@ if __name__ == '__main__':
             # model_file = tf.train.latest_checkpoint('{}_{}_checkpoint/wd_{}_lr_{}/'.format(args.model, args.dataset, args.wd, args.lr))
             # saver.restore(sess, model_file)
     
-    #TODO:Our model
-    elif model_type=="Dyninfo":
+    #Our dynmf model
+    elif model_type=="dynmf":
         if args.pretrain == 0:
             t0 = time()
             loss_loger, pre_loger, rec_loger, ndcg_loger, auc_loger, hit_loger = [], [], [], [], [], []
@@ -461,19 +465,24 @@ if __name__ == '__main__':
 
             for epoch in range(args.epoch):
                 t1 = time()
-                loss, mf_loss, reg_loss = 0., 0., 0.
+                loss, mf_loss1, mf_loss2, reg_loss  = 0., 0., 0., 0.
                 n_batch = data.n_train // args.batch_size + 1
                 
 
                 for idx in range(n_batch):
-                    users, pos_items, neg_items = data.sample_dyninfo()
+                    users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = data.sample_infonce(data.user_pop_idx,data.item_pop_idx)
                     if args.train=="normal":
-                        _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt, model.loss, model.mf_loss, model.reg_loss],
+                        _, batch_loss, batch_mf_loss1, batch_mf_loss2, batch_reg_loss = sess.run([model.opt, model.loss, model.mf_loss1, model.mf_loss2,model.reg_loss],
                                         feed_dict = {model.users: users,
                                                     model.pos_items: pos_items,
-                                                    model.neg_items: neg_items})
-                    mf_loss += batch_mf_loss/n_batch
+                                                    model.neg_items: neg_items,
+                                                    model.users_pop: users_pop,
+                                                    model.pos_items_pop: pos_items_pop,
+                                                    model.neg_items_pop: neg_items_pop})
+                    mf_loss1 += batch_mf_loss1/n_batch
+                    mf_loss2 += batch_mf_loss2/n_batch
                     reg_loss += batch_reg_loss/n_batch
+                    loss += batch_loss/n_batch
                 if np.isnan(loss) == True:
                     print('ERROR: loss is nan.')
                     sys.exit()
@@ -481,7 +490,7 @@ if __name__ == '__main__':
                 # print the test evaluation metrics each 10 epochs; pos:neg = 1:10.
                 if (epoch + 1) % args.log_interval != 0:
                     if args.verbose > 0 and epoch % args.verbose == 0:
-                        perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss, reg_loss)
+                        perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss1, mf_loss2, reg_loss)
                         print(perf_str)
                     continue
 
@@ -504,9 +513,9 @@ if __name__ == '__main__':
                     ndcg_loger.append(ret['ndcg'][0])
                     hit_loger.append(ret['hit_ratio'][0])
                     if args.verbose > 0:
-                        perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
+                        perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f + %.8f], recall=[%.5f, %.5f], ' \
                                 'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                                (epoch, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
+                                (epoch, t2 - t1, t3 - t2, loss, mf_loss1, mf_loss2, reg_loss, ret['recall'][0], ret['recall'][-1],
                                     ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                     ret['ndcg'][0], ret['ndcg'][-1])
                         print(perf_str)

@@ -52,7 +52,7 @@ def parse_args():
                         help='Train/Test.')
     parser.add_argument('--save_flag', type=int, default=1,
                         help='0: Disable model saver, 1: Activate model saver')
-    parser.add_argument('--cuda', type=str, default='1',
+    parser.add_argument('--cuda', type=str, default='0',
                         help='Avaiable GPU ID')
     parser.add_argument('--pretrain', type=int, default=0,
                         help='0: no pretrain, 1: load pretrain model')
@@ -90,12 +90,16 @@ def parse_args():
                         help='check c step.')
     
     #new args
-    parser.add_argument('--neg_sample', type=int, default=10,
+    parser.add_argument('--neg_sample', type=int, default=128,
                         help='negative sample ratio.')    
     parser.add_argument('--tau', type=int, default=1,
                         help='temperature parameter, should be equal or greater than 1.')
-    parser.add_argument('--pop_partition_user', type=int, default=100, 
-                        help='# of user popularity partition, -1 to set to max')  
-    parser.add_argument('--pop_partition_item', type=int, default=100, 
-                        help='# of item popularity partitions, -1 to set to max')                    
+    parser.add_argument('--tau_info', type=int, default=0.1,
+                        help='temperature parameter for InfoNCE.')
+    parser.add_argument('--w_lambda', type=int, default=0.5,
+                        help='weight for combining l1 and l2.')
+    # parser.add_argument('--pop_partition_user', type=int, default=100, 
+    #                     help='# of user popularity partition, -1 to set to max')  
+    # parser.add_argument('--pop_partition_item', type=int, default=100, 
+    #                     help='# of item popularity partitions, -1 to set to max')                    
     return parser.parse_args()

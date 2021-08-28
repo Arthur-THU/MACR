@@ -25,7 +25,7 @@ class Data():
 
     def load_ori_data(self, args):
         self.path = './data/{}/'.format(args.dataset)
-        if args.model == 'mf' or args.model == 'biasmf':
+        if args.model == 'mf' or args.model == 'biasmf' or args.model == 'dynmf':
             if args.source=="dice":
                 self.path = "data/ml10m_dice/"
                 train_record = sp.load_npz(self.path+"train_coo_record.npz").tolil(copy=True)
@@ -115,6 +115,35 @@ class Data():
                 #     self.n_train += len(self.train_user_list[i])
                 #     self.n_test += len(self.test_user_list[i])
                 #     self.n_valid += len(self.valid_user_list[i])
+            pop_user={key:len(value) for key,value in self.train_user_list.items()}
+            pop_item={key:len(value) for key,value in self.train_item_list.items()}
+            sorted_pop_user=list(set(list(pop_user.values())))
+            sorted_pop_item=list(set(list(pop_item.values())))
+            sorted_pop_user.sort()
+            sorted_pop_item.sort()
+            #print(sorted_pop_user)
+            #print(sorted_pop_item)
+            self.user_pop_num=len(sorted_pop_user)
+            self.item_pop_num=len(sorted_pop_item)
+            user_idx={}
+            item_idx={}
+            for i, item in enumerate(sorted_pop_user):
+                user_idx[item]=i
+            for i, item in enumerate(sorted_pop_item):
+                item_idx[item]=i
+            self.user_pop_idx={}
+            self.item_pop_idx={}
+            for key,value in pop_user.items():
+                self.user_pop_idx[key]=user_idx[value]
+            for key,value in pop_item.items():
+                self.item_pop_idx[key]=item_idx[value]
+                    
+
+                
+
+
+                
+
                 
         elif args.model == 'CausalE' or args.model == 'IPSmf':
             if args.dataset == 'movielens_ml_10m' or args.dataset == 'movielens_ml_1m' or args.dataset == 'lastfm' or args.dataset == 'addressa'\
@@ -530,42 +559,13 @@ class Data():
         self.valid_users = list(self.valid_users)
         self.valid_items = list(self.valid_items)
         # self.plot_pics(args)
-        print('n_items:', self.n_items, 'n_users:', self.n_users)
+        #print('n_items:', self.n_items, 'n_users:', self.n_users)
         sum = 0
         for item, users in self.train_item_list.items():
             sum += len(users)
-        print("sparsity:", 1.0*sum/self.n_items/self.n_users)
+        #print("sparsity:", 1.0*sum/self.n_items/self.n_users)
 
-    #TODO: determine the popularity one-hot scheme
-
-    def sample_infonce(self):
-        if self.batch_size <= self.n_users:
-            users = rd.sample(self.users, self.batch_size)
-        else:
-            users = [rd.choice(self.users) for _ in range(self.batch_size)]
-
-        pos_items, neg_items = [], []
-
-        for user in users:
-            if self.train_user_list[user] == []:
-                pos_items.append(0)
-            else:
-                pos_items.append(rd.choice(self.train_user_list[user]))
-            cnt=0
-            while True:
-                neg_item = rd.choice(self.items)
-                if neg_item not in self.train_user_list[user]:
-                    neg_items.append(neg_item)
-                    cnt+=1
-                    if cnt==self.neg_sample:
-                        break
-
-        for i in range(len(users)):
-            if pos_items[i] >= self.n_items:
-                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
-                    neg_items[p] += self.n_items
-
-        return users, pos_items, neg_items
+    
         
 
 
@@ -635,4 +635,54 @@ class Data():
                     break
 
         return users, pos_items, neg_items
+
+
+    def sample_infonce(self,user_pop_idx,item_pop_idx):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
+
         
+        users_pop = []
+
+        pos_items, neg_items = [], []
+        pos_items_pop,neg_items_pop = [], []
+
+        for user in users:
+            if user in user_pop_idx:
+                users_pop.append(user_pop_idx[user])
+            else:
+                users_pop.append(0)
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                pos_items.append(rd.choice(self.train_user_list[user]))
+            cnt=0
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user]:
+                    neg_items.append(neg_item)
+                    cnt+=1
+                    if cnt==self.neg_sample:
+                        break
+
+        for i in range(len(users)):
+            if pos_items[i] >= self.n_items:
+                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
+                    neg_items[p] += self.n_items
+        
+
+        for item in pos_items:
+            if item in item_pop_idx:
+                pos_items_pop.append(item_pop_idx[item])
+            else:
+                pos_items_pop.append(0)
+        
+        for item in neg_items:
+            if item in item_pop_idx:
+                neg_items_pop.append(item_pop_idx[item])
+            else:
+                neg_items_pop.append(0)
+
+        return users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop

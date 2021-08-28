@@ -326,8 +326,8 @@ class BPRMF:
             print("#params: %d" % total_parameters)
 
 
-class DynInfoMF:
-    def __init__(self, args, data_config):
+class DYNMF:
+    def __init__(self, args, data_config,user_pop_num,item_pop_num):
         self.n_users = data_config['n_users']
         self.n_items = data_config['n_items']
 
@@ -337,10 +337,11 @@ class DynInfoMF:
         self.batch_size = args.batch_size
         self.verbose = args.verbose
         self.tau = args.tau
+        self.temp = args.tau_info
+        self.w_lambda = args.w_lambda
         self.neg_sample=args.neg_sample
-        self.pop_partition_user=args.pop_partition_user
-        self.pop_partition_item=args.pop_partition_item
-
+        self.pop_partition_user=user_pop_num
+        self.pop_partition_item=item_pop_num
 
         #placeholders
         self.users = tf.placeholder(tf.int32, shape = (None,))
@@ -363,6 +364,8 @@ class DynInfoMF:
         pos_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.pos_items_pop)
         neg_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.neg_items_pop)
 
+        self.batch_ratings = tf.matmul(user_embedding, pos_item_embedding, transpose_a=False, transpose_b = True)    #prediction, shape(user_embedding) != shape(pos_item_embedding)
+
 
         self.mf_loss1, self.mf_loss2, self.reg_loss = self.create_dyninfonce_loss(user_embedding, pos_item_embedding, neg_item_embedding, user_pop_embedding, pos_item_pop_embedding,neg_item_pop_embedding)
 
@@ -373,7 +376,6 @@ class DynInfoMF:
         self.opt = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss, var_list = trainable_v1)
 
         self._statistics_params()
-
 
 
 
@@ -400,13 +402,13 @@ class DynInfoMF:
 
         neg_item_pop_score_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_pop_score,[-1,self.neg_sample])),axis=1)
         pos_item_pop_score_exp=tf.exp(pos_item_score)
-        loss2=tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
+        loss2=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/self.temp/(pos_item_pop_score_exp/self.temp+neg_item_pop_score_exp/self.temp))))
 
         weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_score))/self.tau
         weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_score))/self.tau
         neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
         pos_item_score_exp=tf.exp(weighted_pos_item_score)
-        loss1=tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
+        loss1=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/self.temp/(pos_item_score_exp/self.temp+neg_item_score_exp/self.temp))))
 
         regularizer1 = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
         regularizer1 = regularizer1/self.batch_size

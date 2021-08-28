@@ -27,8 +27,16 @@ For example:
 
 Normal MF:
 ```Python
-python ./macr_mf/train.py --dataset addressa --batch_size 128 --cuda 1 --saveID 1 --log_interval 10 --lr 0.001 --train normalbce --test normal
+python ./macr_mf/train.py --dataset addressa --batch_size 128 --cuda 0 --saveID 1 --log_interval 10 --lr 0.001 --train normalbce --test normal
 ```
+
+DynInfoNCE MF:
+
+```Python
+python ./macr_mf/train.py --dataset addressa --batch_size 128 --cuda 0 --saveID 2 --model dynmf --log_interval 10 --lr 0.001 --train normal --test normal
+```
+
+
 MACR MF:
 ```Python
 python ./macr_mf/train.py --dataset addressa --batch_size 128 --cuda 1 --saveID 1 --log_interval 1 --lr 0.001 --check_c 1 --start -1 --end 1 --step 21 --train rubibceboth --test rubi --alpha 1e-3 --beta 1e-3
