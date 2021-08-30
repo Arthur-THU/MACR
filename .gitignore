@@ -4,3 +4,6 @@ checkpoint
 *.txt
 *.pyc
 *.rar
+*.npz
+events.out.*
+*.cpython-37.pyc

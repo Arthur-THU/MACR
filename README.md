@@ -46,6 +46,12 @@ Normal LightGCN:
 ```Python
 python macr_lightgcn/LightGCN.py --data_path data/ --dataset addressa --verbose 1 --layer_size [64,64] --Ks [20] --loss bce --test normal --epoch 2000 --early_stop 1 --lr 0.001 --batch_size 1024 --gpu_id 1 --log_interval 10
 ```
+
+DynInfoNCE LightGCN:
+```Python
+python macr_lightgcn/LightGCN.py --data_path data/ --dataset addressa --verbose 1 --layer_size [64,64] --Ks [20] --loss dyninfo  --test normal --epoch 2000 --early_stop 1 --lr 0.001 --batch_size 128 --gpu_id 0 --log_interval 10
+```
+
 MACR LightGCN:
 ```Python
 python macr_lightgcn/LightGCN.py --data_path data/ --dataset addressa --verbose 1 --layer_size [64,64] --Ks [20] --loss bceboth --test rubiboth --start 0 --end 50 --step 31 --epoch 2000 --early_stop 1 --lr 0.001 --batch_size 1024 --gpu_id 1 --log_interval 10 --alpha 1e-3 --beta 1e-3

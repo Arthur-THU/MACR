@@ -90,7 +90,7 @@ def parse_args():
                         help='check c step.')
     
     #new args
-    parser.add_argument('--neg_sample', type=int, default=128,
+    parser.add_argument('--neg_sample', type=int, default=10,
                         help='negative sample ratio.')    
     parser.add_argument('--tau', type=int, default=1,
                         help='temperature parameter, should be equal or greater than 1.')

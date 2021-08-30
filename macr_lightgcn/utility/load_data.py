@@ -12,9 +12,10 @@ from time import time
 import collections
 
 class Data(object):
-    def __init__(self, path, batch_size):
+    def __init__(self, path, batch_size, neg_sample):
         self.path = path
         self.batch_size = batch_size
+        self.neg_sample = neg_sample
 
         train_file = path + '/train.txt'
         test_file = path + '/test.txt'
@@ -54,6 +55,12 @@ class Data(object):
         self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
         self.train_items, self.test_set = {}, {}
         self.test_item_set = collections.defaultdict(list)
+        self.train_user_list = collections.defaultdict(list)
+        self.train_item_list = collections.defaultdict(list)
+        self.users = list(range(self.n_users))
+        self.items = list(range(self.n_items))
+
+        
         with open(train_file) as f_train:
             with open(test_file) as f_test:
                 for l in f_train.readlines():
@@ -68,6 +75,10 @@ class Data(object):
                         self.R[uid, i] = 1.
                         
                     self.train_items[uid] = train_items
+
+                    self.train_user_list[uid] = train_items
+                    for item in train_items:
+                        self.train_item_list[item].append(uid)
                     
                 for l in f_test.readlines():
                     if len(l) == 0: break
@@ -83,7 +94,30 @@ class Data(object):
                         continue
                     self.test_set[uid] = test_items
                     for item in test_items:
-                        self.test_item_set[item].append(uid)
+                        self.test_item_set[item].append(uid) 
+        
+        pop_user={key:len(value) for key,value in self.train_user_list.items()}
+        pop_item={key:len(value) for key,value in self.train_item_list.items()}
+        sorted_pop_user=list(set(list(pop_user.values())))
+        sorted_pop_item=list(set(list(pop_item.values())))
+        sorted_pop_user.sort()
+        sorted_pop_item.sort()
+        #print(sorted_pop_user)
+        #print(sorted_pop_item)
+        self.user_pop_num=len(sorted_pop_user)
+        self.item_pop_num=len(sorted_pop_item)
+        user_idx={}
+        item_idx={}
+        for i, item in enumerate(sorted_pop_user):
+            user_idx[item]=i
+        for i, item in enumerate(sorted_pop_item):
+            item_idx[item]=i
+        self.user_pop_idx={}
+        self.item_pop_idx={}
+        for key,value in pop_user.items():
+            self.user_pop_idx[key]=user_idx[value]
+        for key,value in pop_item.items():
+            self.item_pop_idx[key]=item_idx[value]
         # for uid in range(self.n_users):
         #     if self.train_items.__contains__(uid) and self.test_set.__contains__(uid):
         #         if len(set(self.train_items[uid]) & set(self.test_set[uid]))!=0:
@@ -252,9 +286,6 @@ class Data(object):
     
     
     
-    
-    
-    
     def get_num_users_items(self):
         return self.n_users, self.n_items
 
@@ -346,3 +377,56 @@ class Data(object):
             if self.train_items.__contains__(uid) and self.test_set.__contains__(uid):
                 if len(set(self.train_items[uid]) & set(self.test_set[uid]))!=0:
                     print(uid)
+
+    def sample_infonce(self,user_pop_idx,item_pop_idx):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
+
+        
+        users_pop = []
+
+        pos_items, neg_items = [], []
+        pos_items_pop,neg_items_pop = [], []
+
+        for user in users:
+            if user in user_pop_idx:
+                users_pop.append(user_pop_idx[user])
+            else:
+                users_pop.append(0)
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                pos_items.append(rd.choice(self.train_user_list[user]))
+            cnt=0
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user]:
+                    neg_items.append(neg_item)
+                    cnt+=1
+                    if cnt==self.neg_sample:
+                        break
+
+        for i in range(len(users)):
+            if pos_items[i] >= self.n_items:
+                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
+                    neg_items[p] += self.n_items
+        
+
+        for item in pos_items:
+            if item in item_pop_idx:
+                pos_items_pop.append(item_pop_idx[item])
+            else:
+                pos_items_pop.append(0)
+        
+        for item in neg_items:
+            if item in item_pop_idx:
+                neg_items_pop.append(item_pop_idx[item])
+            else:
+                neg_items_pop.append(0)
+
+        return users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop
+
+
+

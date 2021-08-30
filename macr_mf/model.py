@@ -395,25 +395,45 @@ class DYNMF:
     def create_dyninfonce_loss(self, users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop):
         tiled_usr=tf.reshape(tf.tile(users,[1,self.neg_sample]),[-1,self.emb_dim])
         tiled_usr_pop=tf.reshape(tf.tile(users_pop,[1,self.neg_sample]),[-1,self.emb_dim])
-        pos_item_score=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)
-        neg_item_score=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)
-        pos_item_pop_score=tf.reduce_sum(tf.multiply(users_pop,pos_items_pop),axis=1)
-        neg_item_pop_score=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
+
+        # user_n2=tf.norm(users,ord=2,axis=1)
+        # user_pop_n2=tf.norm(users_pop,ord=2,axis=1)
+        # tiled_usr_n2=tf.norm(tiled_usr,ord=2,axis=1)
+        # tiled_usr_pop_n2=tf.norm(tiled_usr_pop,ord=2,axis=1)#tf.sqrt(tf.reduce_sum(tf.multiply(tiled_usr_pop,tiled_usr_pop),axis=1))
+        # pos_item_n2=tf.norm(pos_items,ord=2,axis=1)
+        # neg_item_n2=tf.norm(neg_items,ord=2,axis=1)
+        # neg_item_pop_n2=tf.norm(neg_items_pop,ord=2,axis=1)
+        # pos_item_pop_n2=tf.norm(pos_items_pop,ord=2,axis=1)
+        
+       
+        pos_item_pop_prod=tf.reduce_sum(tf.multiply(users_pop,pos_items_pop),axis=1)
+        neg_item_pop_prod=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
+        pos_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(users,pos_items),axis=1))/self.temp
+        neg_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1))/self.temp
+        pos_item_pop_score=tf.sigmoid(pos_item_pop_prod)/self.temp
+        neg_item_pop_score=tf.sigmoid(neg_item_pop_prod)/self.temp
+
+
+        #pos_item_score=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)/user_n2/pos_item_n2/self.temp
+        #neg_item_score=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)/tiled_usr_n2/neg_item_n2/self.temp
+        #pos_item_pop_score=pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/self.temp
+        #neg_item_pop_score=neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/self.temp
 
         neg_item_pop_score_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_pop_score,[-1,self.neg_sample])),axis=1)
-        pos_item_pop_score_exp=tf.exp(pos_item_score)
-        loss2=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/self.temp/(pos_item_pop_score_exp/self.temp+neg_item_pop_score_exp/self.temp))))
+        pos_item_pop_score_exp=tf.exp(pos_item_pop_score)
+        loss2=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
 
-        weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_score))/self.tau
-        weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_score))/self.tau
+        weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_prod))/self.tau
+        weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_prod))/self.tau
         neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
         pos_item_score_exp=tf.exp(weighted_pos_item_score)
-        loss1=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/self.temp/(pos_item_score_exp/self.temp+neg_item_score_exp/self.temp))))
+        loss1=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
 
         regularizer1 = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
         regularizer1 = regularizer1/self.batch_size
 
         regularizer2=  tf.nn.l2_loss(users_pop) + tf.nn.l2_loss(pos_items_pop) + tf.nn.l2_loss(neg_items_pop)
+        regularizer2  = regularizer2/self.batch_size
         reg_loss = self.decay * (regularizer1+regularizer2)
 
         return loss1, loss2, reg_loss

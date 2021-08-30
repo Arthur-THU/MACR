@@ -99,4 +99,15 @@ def parse_args():
 
     parser.add_argument('--out', type=int, default=0) 
 
+
+    #new args
+    parser.add_argument('--neg_sample', type=int, default=128,
+                        help='negative sample ratio.')    
+    parser.add_argument('--tau', type=int, default=1,
+                        help='temperature parameter, should be equal or greater than 1.')
+    parser.add_argument('--tau_info', type=int, default=0.1,
+                        help='temperature parameter for InfoNCE.')
+    parser.add_argument('--w_lambda', type=int, default=0.5,
+                        help='weight for combining l1 and l2.')
+
     return parser.parse_args()

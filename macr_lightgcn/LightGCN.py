@@ -27,7 +27,7 @@ gpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'GPU
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
 
 class LightGCN(object):
-    def __init__(self, data_config, pretrain_data):
+    def __init__(self, data_config, pretrain_data,user_pop_num=-1,item_pop_num=-1):
         # argument settings
         self.model_type = 'LightGCN'
         self.adj_type = args.adj_type
@@ -49,6 +49,13 @@ class LightGCN(object):
         self.verbose = args.verbose
         self.Ks = eval(args.Ks)
 
+        self.tau = args.tau
+        self.temp = args.tau_info
+        self.w_lambda = args.w_lambda
+        self.neg_sample=args.neg_sample
+        self.pop_partition_user=user_pop_num
+        self.pop_partition_item=item_pop_num
+
 
         '''
         *********************************************************
@@ -58,6 +65,10 @@ class LightGCN(object):
         self.users = tf.placeholder(tf.int32, shape=(None,))
         self.pos_items = tf.placeholder(tf.int32, shape=(None,))
         self.neg_items = tf.placeholder(tf.int32, shape=(None,))
+
+        self.users_pop = tf.placeholder(tf.int32, shape = (None,))
+        self.pos_items_pop = tf.placeholder(tf.int32, shape = (None,))
+        self.neg_items_pop = tf.placeholder(tf.int32, shape = (None,))
         
         self.node_dropout_flag = args.node_dropout_flag
         self.node_dropout = tf.placeholder(tf.float32, shape=[None])
@@ -146,6 +157,11 @@ class LightGCN(object):
         self.pos_i_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['item_embedding'], self.pos_items)
         self.neg_i_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['item_embedding'], self.neg_items)
 
+
+        self.user_pop_embedding = tf.nn.embedding_lookup(self.weights['user_pop_embedding'], self.users_pop)
+        self.pos_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.pos_items_pop)
+        self.neg_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.neg_items_pop)
+
         """
         *********************************************************
         Establish 2 brach.
@@ -167,6 +183,17 @@ class LightGCN(object):
         *********************************************************
         Generate Predictions & Optimize via BPR loss.
         """
+        self.mf_loss_info_1, self.mf_loss_info_2, self.reg_loss_info = self.create_dyninfonce_loss(self.u_g_embeddings,
+                                                                          self.pos_i_g_embeddings,
+                                                                          self.neg_i_g_embeddings,
+                                                                          self.user_pop_embedding,
+                                                                          self.pos_item_pop_embedding,
+                                                                          self.neg_item_pop_embedding)
+
+
+        self.loss_info = self.mf_loss_info_1 + self.mf_loss_info_2 + self.reg_loss_info
+        self.opt_info = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_info)
+
         self.mf_loss, self.emb_loss, self.reg_loss = self.create_bpr_loss(self.u_g_embeddings,
                                                                           self.pos_i_g_embeddings,
                                                                           self.neg_i_g_embeddings)
@@ -228,6 +255,10 @@ class LightGCN(object):
             all_weights['item_embedding'] = tf.Variable(initial_value=self.pretrain_data['item_embed'], trainable=True,
                                                         name='item_embedding', dtype=tf.float32)
             print('using pretrained initialization')
+
+        if self.pop_partition_user!=-1:
+            all_weights["user_pop_embedding"] = tf.Variable(initializer([self.pop_partition_user, self.emb_dim]), name = 'user_pop_embedding')
+            all_weights["item_pop_embedding"] = tf.Variable(initializer([self.pop_partition_item, self.emb_dim]), name = 'item_pop_embedding')
 
         self.w = tf.Variable(initializer([self.emb_dim, 1]), name = 'item_branch')
         self.w_user = tf.Variable(initializer([self.emb_dim, 1]), name = 'user_branch')
@@ -425,6 +456,51 @@ class LightGCN(object):
         
         return mf_loss, emb_loss, reg_loss
 
+    def create_dyninfonce_loss(self, users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop):
+        tiled_usr=tf.reshape(tf.tile(users,[1,self.neg_sample]),[-1,self.emb_dim])
+        tiled_usr_pop=tf.reshape(tf.tile(users_pop,[1,self.neg_sample]),[-1,self.emb_dim])
+
+        # user_n2=tf.norm(users,ord=2,axis=1)
+        # user_pop_n2=tf.norm(users_pop,ord=2,axis=1)
+        # tiled_usr_n2=tf.norm(tiled_usr,ord=2,axis=1)
+        # tiled_usr_pop_n2=tf.norm(tiled_usr_pop,ord=2,axis=1)#tf.sqrt(tf.reduce_sum(tf.multiply(tiled_usr_pop,tiled_usr_pop),axis=1))
+        # pos_item_n2=tf.norm(pos_items,ord=2,axis=1)
+        # neg_item_n2=tf.norm(neg_items,ord=2,axis=1)
+        # neg_item_pop_n2=tf.norm(neg_items_pop,ord=2,axis=1)
+        # pos_item_pop_n2=tf.norm(pos_items_pop,ord=2,axis=1)
+        
+       
+        pos_item_pop_prod=tf.reduce_sum(tf.multiply(users_pop,pos_items_pop),axis=1)
+        neg_item_pop_prod=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
+        pos_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(users,pos_items),axis=1))/self.temp
+        neg_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1))/self.temp
+        pos_item_pop_score=tf.sigmoid(pos_item_pop_prod)/self.temp
+        neg_item_pop_score=tf.sigmoid(neg_item_pop_prod)/self.temp
+
+
+        #pos_item_score=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)/user_n2/pos_item_n2/self.temp
+        #neg_item_score=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)/tiled_usr_n2/neg_item_n2/self.temp
+        #pos_item_pop_score=pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/self.temp
+        #neg_item_pop_score=neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/self.temp
+
+        neg_item_pop_score_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_pop_score,[-1,self.neg_sample])),axis=1)
+        pos_item_pop_score_exp=tf.exp(pos_item_pop_score)
+        loss2=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
+
+        weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_prod))/self.tau
+        weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_prod))/self.tau
+        neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
+        pos_item_score_exp=tf.exp(weighted_pos_item_score)
+        loss1=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
+
+        regularizer1 = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
+        regularizer1 = regularizer1/self.batch_size
+
+        regularizer2=  tf.nn.l2_loss(users_pop) + tf.nn.l2_loss(pos_items_pop) + tf.nn.l2_loss(neg_items_pop)
+        regularizer2  = regularizer2/self.batch_size
+        reg_loss = self.decay * (regularizer1+regularizer2)
+
+        return loss1, loss2, reg_loss
 
     def create_bce_loss_two_brach1(self, users, pos_items, neg_items):
         pos_scores = tf.reduce_sum(tf.multiply(users, pos_items), axis=1)   #users, pos_items, neg_items have the same shape
@@ -562,18 +638,27 @@ def load_pretrained_data():
 
 # parallelized sampling on CPU 
 class sample_thread(threading.Thread):
-    def __init__(self):
+    def __init__(self,pop=0):
+        self.pop=pop
         threading.Thread.__init__(self)
     def run(self):
-        with tf.device(cpus[0]):
-            self.data = data_generator.sample()
+        if not self.pop:
+            with tf.device(cpus[0]):
+                self.data = data_generator.sample()
+        else:
+            with tf.device(cpus[0]):
+                self.data = data_generator.sample_infonce(data_generator.user_pop_idx,data_generator.item_pop_idx)
 
 class sample_thread_test(threading.Thread):
-    def __init__(self):
+    def __init__(self,pop=0):
         threading.Thread.__init__(self)
     def run(self):
-        with tf.device(cpus[0]):
-            self.data = data_generator.sample_test()
+        if not self.pop:
+            with tf.device(cpus[0]):
+                self.data = data_generator.sample_test()
+        else:
+            with tf.device(cpus[0]):
+                self.data = data_generator.sample_infonce(data_generator.user_pop_idx,data_generator.item_pop_idx)
             
 # training on GPU
 class train_thread(threading.Thread):
@@ -594,21 +679,48 @@ class train_thread(threading.Thread):
             sess_list = [self.model.opt_two_bce2, self.model.loss_two_bce2, self.model.mf_loss_two_bce2, self.model.emb_loss_two_bce2, self.model.reg_loss_two_bce2]
         elif args.loss == 'bceboth':
             sess_list = [self.model.opt_two_bce_both, self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both, self.model.reg_loss_two_bce_both]
-        if len(gpus):
-            with tf.device(gpus[-1]):
+        elif args.loss == 'dyninfo':
+            sess_list = [self.model.opt_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
+
+        if args.loss!="dyninfo":
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items})
+            else:
                 users, pos_items, neg_items = self.sample.data
                 self.data = sess.run(sess_list,
-                                       feed_dict={model.users: users, model.pos_items: pos_items,
-                                                  model.node_dropout: eval(args.node_dropout),
-                                                  model.mess_dropout: eval(args.mess_dropout),
-                                                  model.neg_items: neg_items})
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items})
         else:
-            users, pos_items, neg_items = self.sample.data
-            self.data = sess.run(sess_list,
-                                       feed_dict={model.users: users, model.pos_items: pos_items,
-                                                  model.node_dropout: eval(args.node_dropout),
-                                                  model.mess_dropout: eval(args.mess_dropout),
-                                                  model.neg_items: neg_items})
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.users_pop: users_pop,
+                                                    model.pos_items_pop: pos_items_pop,
+                                                    model.neg_items_pop: neg_items_pop
+                                                    })
+            else:
+                users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = self.sample.data
+                self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.users_pop: users_pop,
+                                                    model.pos_items_pop: pos_items_pop,
+                                                    model.neg_items_pop: neg_items_pop})
 class train_thread_test(threading.Thread):
     def __init__(self, model, sess, sample, args):
         threading.Thread.__init__(self)
@@ -627,21 +739,49 @@ class train_thread_test(threading.Thread):
             sess_list = [self.model.loss_two_bce2, self.model.mf_loss_two_bce2, self.model.emb_loss_two_bce2]
         elif args.loss == 'bceboth':
             sess_list = [self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both]
-        if len(gpus):
-            with tf.device(gpus[-1]):
+        elif args.loss == 'dyninfo':
+            sess_list = [self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
+
+        if args.loss!="dyninfo":
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.neg_items: neg_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout)})
+            else:
                 users, pos_items, neg_items = self.sample.data
                 self.data = sess.run(sess_list,
-                                     feed_dict={model.users: users, model.pos_items: pos_items,
-                                                model.neg_items: neg_items,
-                                                model.node_dropout: eval(args.node_dropout),
-                                                model.mess_dropout: eval(args.mess_dropout)})
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.neg_items: neg_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout)})
         else:
-            users, pos_items, neg_items = self.sample.data
-            self.data = sess.run(sess_list,
-                                     feed_dict={model.users: users, model.pos_items: pos_items,
-                                                model.neg_items: neg_items,
-                                                model.node_dropout: eval(args.node_dropout),
-                                                model.mess_dropout: eval(args.mess_dropout)})            
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.users_pop: users_pop,
+                                                    model.pos_items_pop: pos_items_pop,
+                                                    model.neg_items_pop: neg_items_pop
+                                                    })
+            else:
+                users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = self.sample.data
+                self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.users_pop: users_pop,
+                                                    model.pos_items_pop: pos_items_pop,
+                                                    model.neg_items_pop: neg_items_pop})
+
 
 if __name__ == '__main__':
     # os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
@@ -665,7 +805,7 @@ if __name__ == '__main__':
     elif args.adj_type == 'gcmc':
         config['norm_adj'] = mean_adj
         print('use the gcmc adjacency matrix')
-    elif args.adj_type=='pre':
+    elif args.adj_type =='pre':
         config['norm_adj']=pre_adj
         print('use the pre adjcency matrix')
     else:
@@ -676,7 +816,7 @@ if __name__ == '__main__':
         pretrain_data = load_pretrained_data()
     else:
         pretrain_data = None
-    model = LightGCN(data_config=config, pretrain_data=pretrain_data)
+    model = LightGCN(data_config=config, pretrain_data=pretrain_data,user_pop_num=data_generator.user_pop_num, item_pop_num=data_generator.item_pop_num)
     
     """
     *********************************************************
@@ -753,6 +893,8 @@ if __name__ == '__main__':
     best_epoch=0
     best_hr_norm = 0
     best_str = ''
+
+    is_pop = (args.loss=="dyninfo")
     # data_generator.check()
     if args.only_test == 0 and args.pretrain == 0:
         for epoch in range(1, args.epoch + 1):
@@ -764,34 +906,40 @@ if __name__ == '__main__':
             *********************************************************
             parallelized train sampling
             '''
-            sample_last = sample_thread()
+            sample_last = sample_thread(pop=is_pop)
             sample_last.start()
             sample_last.join()
             for idx in range(n_batch):
                 train_cur = train_thread(model, sess, sample_last, args)
-                sample_next = sample_thread()
+                sample_next = sample_thread(pop=is_pop)
                 
                 train_cur.start()
                 sample_next.start()
                 
                 sample_next.join()
                 train_cur.join()
-                
-                users, pos_items, neg_items = sample_last.data
+                #users, pos_items, neg_items, users_pop = sample_last.data
                 _, batch_loss, batch_mf_loss, batch_emb_loss, batch_reg_loss = train_cur.data
                 sample_last = sample_next
             
                 loss += batch_loss/n_batch
                 mf_loss += batch_mf_loss/n_batch
                 emb_loss += batch_emb_loss/n_batch
+                reg_loss += batch_reg_loss/n_batch
+                
+
                 
             if np.isnan(loss) == True:
+                if args.verbose > 0 and epoch % args.verbose == 0:
+                    perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
+                        epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
+                    print(perf_str)
                 print('ERROR: loss is nan.')
                 sys.exit()
             if (epoch % args.log_interval) != 0:
                 if args.verbose > 0 and epoch % args.verbose == 0:
-                    perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f]' % (
-                        epoch, time() - t1, loss, mf_loss, emb_loss)
+                    perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
+                        epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
                     print(perf_str)
                 continue
             # users_to_test = list(data_generator.train_items.keys())
@@ -813,13 +961,13 @@ if __name__ == '__main__':
             parallelized test sampling
             '''
             # test loss
-            sample_last= sample_thread_test()
+            sample_last= sample_thread_test(pop=is_pop)
             sample_last.start()
             sample_last.join()
             loss_test,mf_loss_test,emb_loss_test,reg_loss_test=0.,0.,0.,0.
             for idx in range(n_batch):
                 train_cur = train_thread_test(model, sess, sample_last, args)
-                sample_next = sample_thread_test()
+                sample_next = sample_thread_test(pop=is_pop)
                 
                 train_cur.start()
                 sample_next.start()
@@ -827,7 +975,7 @@ if __name__ == '__main__':
                 sample_next.join()
                 train_cur.join()
                 
-                users, pos_items, neg_items = sample_last.data
+                #users, pos_items, neg_items = sample_last.data
                 batch_loss_test, batch_mf_loss_test, batch_emb_loss_test = train_cur.data
                 sample_last = sample_next
                 
