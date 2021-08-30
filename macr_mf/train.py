@@ -9,6 +9,7 @@ import math
 import logging
 from time import time
 import multiprocessing
+from tqdm import tqdm
 from scipy.special import softmax, expit
 from model import BPRMF, CausalE, IPS_BPRMF, BIASMF, DYNMF
 from batch_test import *
@@ -329,9 +330,19 @@ def early_stop(hr, ndcg, recall, precision, cur_epoch, config, stopping_step, fl
 
     return config, stopping_step, should_stop
 
+
+def ensureDir(dir_path):
+    d = os.path.dirname(dir_path)
+    if not os.path.exists(d):
+        os.makedirs(d)
+
 if __name__ == '__main__':
     # random.seed(123)
     # tf.set_random_seed(123)
+    if args.save_flag==1:
+        weights_save_path='{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)
+        ensureDir(weights_save_path)
+
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
     config = dict()
     config['n_users'] = data.n_users
@@ -469,7 +480,7 @@ if __name__ == '__main__':
                 n_batch = data.n_train // args.batch_size + 1
                 
 
-                for idx in range(n_batch):
+                for idx in tqdm(range(n_batch)):
                     users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = data.sample_infonce(data.user_pop_idx,data.item_pop_idx)
                     if args.train=="normal":
                         _, batch_loss, batch_mf_loss1, batch_mf_loss2, batch_reg_loss = sess.run([model.opt, model.loss, model.mf_loss1, model.mf_loss2,model.reg_loss],
@@ -492,6 +503,8 @@ if __name__ == '__main__':
                     if args.verbose > 0 and epoch % args.verbose == 0:
                         perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss1, mf_loss2, reg_loss)
                         print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
                     continue
 
                 t2 = time()
@@ -519,6 +532,8 @@ if __name__ == '__main__':
                                     ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                     ret['ndcg'][0], ret['ndcg'][-1])
                         print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
                 elif args.test=="rubi":
                     print('Epoch %d'%(epoch))
                     best_c = 0

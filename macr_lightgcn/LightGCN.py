@@ -15,6 +15,7 @@ import sys
 import threading
 import tensorflow as tf
 from tensorflow.python.client import device_lib
+from tqdm import tqdm
 from utility.helper import *
 from utility.batch_test import *
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
@@ -651,6 +652,7 @@ class sample_thread(threading.Thread):
 
 class sample_thread_test(threading.Thread):
     def __init__(self,pop=0):
+        self.pop=pop
         threading.Thread.__init__(self)
     def run(self):
         if not self.pop:
@@ -730,15 +732,15 @@ class train_thread_test(threading.Thread):
     def run(self):
         sess_list = []
         if args.loss == 'bpr':
-            sess_list = [self.model.loss, self.model.mf_loss, self.model.emb_loss]
+            sess_list = [self.model.loss, self.model.mf_loss, self.model.emb_loss, self.model.reg_loss]
         elif args.loss == 'bce':
-            sess_list = [self.model.loss_bce, self.model.mf_loss_bce, self.model.emb_loss_bce]
+            sess_list = [self.model.loss_bce, self.model.mf_loss_bce, self.model.emb_loss_bce, self.model.reg_loss_bce]
         elif args.loss == 'bce1':
-            sess_list = [self.model.loss_two_bce1, self.model.mf_loss_two_bce1, self.model.emb_loss_two_bce1]
+            sess_list = [self.model.loss_two_bce1, self.model.mf_loss_two_bce1, self.model.emb_loss_two_bce1, self.model.reg_loss_two_bce1]
         elif args.loss == 'bce2':
-            sess_list = [self.model.loss_two_bce2, self.model.mf_loss_two_bce2, self.model.emb_loss_two_bce2]
+            sess_list = [self.model.loss_two_bce2, self.model.mf_loss_two_bce2, self.model.emb_loss_two_bce2, self.model.reg_loss_two_bce2]
         elif args.loss == 'bceboth':
-            sess_list = [self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both]
+            sess_list = [self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both, self.model.reg_loss_two_bce_both]
         elif args.loss == 'dyninfo':
             sess_list = [self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
 
@@ -909,7 +911,7 @@ if __name__ == '__main__':
             sample_last = sample_thread(pop=is_pop)
             sample_last.start()
             sample_last.join()
-            for idx in range(n_batch):
+            for idx in tqdm(range(n_batch)):
                 train_cur = train_thread(model, sess, sample_last, args)
                 sample_next = sample_thread(pop=is_pop)
                 
@@ -940,6 +942,8 @@ if __name__ == '__main__':
                 if args.verbose > 0 and epoch % args.verbose == 0:
                     perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
                         epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
+                    with open(weights_save_path + '/stats_{}.txt'.format(args.saveID),'a') as f:
+                        f.write(perf_str+"\n")
                     print(perf_str)
                 continue
             # users_to_test = list(data_generator.train_items.keys())
@@ -976,12 +980,13 @@ if __name__ == '__main__':
                 train_cur.join()
                 
                 #users, pos_items, neg_items = sample_last.data
-                batch_loss_test, batch_mf_loss_test, batch_emb_loss_test = train_cur.data
+                batch_loss_test, batch_mf_loss_test, batch_emb_loss_test, batch_reg_loss_test = train_cur.data
                 sample_last = sample_next
                 
                 loss_test += batch_loss_test / n_batch
                 mf_loss_test += batch_mf_loss_test / n_batch
                 emb_loss_test += batch_emb_loss_test / n_batch
+                reg_loss_test += batch_reg_loss_test / n_batch
                 
             # summary_test_loss = sess.run(model.merged_test_loss,
             #                             feed_dict={model.test_loss: loss_test, model.test_mf_loss: mf_loss_test,
@@ -1008,6 +1013,8 @@ if __name__ == '__main__':
                                 ', '.join(['%.5f' % r for r in ret['recall']]),
                                 ', '.join(['%.5f' % r for r in ret['hr']]),
                                 ', '.join(['%.5f' % r for r in ret['ndcg']]))
+                    with open(weights_save_path + '/stats_{}.txt'.format(args.saveID),'a') as f:
+                        f.write(perf_str+"\n")
                     print(perf_str, end='')
                 if ret['hr'][0] > best_hr_norm:
                     best_hr_norm = ret['hr'][0]
