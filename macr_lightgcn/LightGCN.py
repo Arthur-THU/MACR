@@ -828,7 +828,7 @@ if __name__ == '__main__':
 
     if args.save_flag == 1:
         layer = '-'.join([str(l) for l in eval(args.layer_size)])
-        weights_save_path = '%sweights/%s/%s/%s/l%s_r%s' % (args.weights_path, args.dataset, model.model_type, layer,
+        weights_save_path = '%sweights/%s/%s/%s/l%s_r%s/' % (args.weights_path, args.dataset, model.model_type, layer,
                                                             str(args.lr), '-'.join([str(r) for r in eval(args.regs)]))
         ensureDir(weights_save_path)
         save_saver = tf.train.Saver(max_to_keep=20000)
@@ -942,7 +942,7 @@ if __name__ == '__main__':
                 if args.verbose > 0 and epoch % args.verbose == 0:
                     perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
                         epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
-                    with open(weights_save_path + '/stats_{}.txt'.format(args.saveID),'a') as f:
+                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                         f.write(perf_str+"\n")
                     print(perf_str)
                 continue
@@ -1013,7 +1013,7 @@ if __name__ == '__main__':
                                 ', '.join(['%.5f' % r for r in ret['recall']]),
                                 ', '.join(['%.5f' % r for r in ret['hr']]),
                                 ', '.join(['%.5f' % r for r in ret['ndcg']]))
-                    with open(weights_save_path + '/stats_{}.txt'.format(args.saveID),'a') as f:
+                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                         f.write(perf_str+"\n")
                     print(perf_str, end='')
                 if ret['hr'][0] > best_hr_norm:
@@ -1090,19 +1090,19 @@ if __name__ == '__main__':
             if ret['hr'][0] == cur_best_pre_0:
                 best_epoch = epoch
             if args.save_flag == 1:
-                save_saver.save(sess, weights_save_path + '/weights_{}'.format(args.saveID), global_step=epoch)
+                save_saver.save(sess, weights_save_path + 'weights_{}'.format(args.saveID), global_step=epoch)
                 print('save the weights in path: ', weights_save_path)
             
             # *********************************************************
             # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
             if should_stop == True and args.early_stop == 1:
                 if args.test != 'normal':
-                    with open(weights_save_path + '/best_epoch_{}.txt'.format(args.saveID),'w') as f:
+                    with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
                         f.write(str(config['best_c_epoch']))
-                    with open(weights_save_path + '/best_c_{}.txt'.format(args.saveID),'w') as f:
+                    with open(weights_save_path + 'best_c_{}.txt'.format(args.saveID),'w') as f:
                         f.write(str(config['best_c']))
                 else:
-                    with open(weights_save_path + '/best_epoch_{}.txt'.format(args.saveID),'w') as f:
+                    with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
                         f.write(str(best_epoch))
                 break
 
@@ -1295,7 +1295,7 @@ if __name__ == '__main__':
         epoch_best_result['ndcg'] = 0
         epoch += args.log_interval
         try:
-            model_file = weights_save_path + '/weights_{}-{}'.format(args.saveID, epoch)
+            model_file = weights_save_path + 'weights_{}-{}'.format(args.saveID, epoch)
             saver.restore(sess, model_file)
         except ValueError:
             break
