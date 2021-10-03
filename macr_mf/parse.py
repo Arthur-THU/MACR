@@ -64,7 +64,7 @@ def parse_args():
                         help='weight decay of popularity')
     parser.add_argument('--base', type=float, default=-1.,
                         help='check range base.')
-    parser.add_argument('--cf_pen', type=float, default=1.0,
+    parser.add_argument('--cf_pen', type=float, default=0.1,
                         help='Imbalance loss.')
     parser.add_argument('--saveID', nargs='?', default='',
                         help='Specify model save path.')
@@ -89,15 +89,45 @@ def parse_args():
     parser.add_argument('--step', type=int, default=20,
                         help='check c step.')
     
-    #new args
+    #new args: DYNMF
     parser.add_argument('--neg_sample', type=int, default=10,
                         help='negative sample ratio.')    
-    parser.add_argument('--tau', type=int, default=1,
-                        help='temperature parameter, should be equal or greater than 1.')
-    parser.add_argument('--tau_info', type=int, default=0.1,
-                        help='temperature parameter for InfoNCE.')
-    parser.add_argument('--w_lambda', type=int, default=0.5,
+    parser.add_argument('--tau', type=float, default=0.2,
+                        help='temperature parameter for L1')
+    parser.add_argument('--tau_info', type=float, default=0.1,
+                        help='temperature parameter for L2')
+    parser.add_argument('--w_lambda', type=float, default=0.5,
                         help='weight for combining l1 and l2.')
+    parser.add_argument('--warm_up', type=int, default=5,
+                        help='warm up epochs for initial tau')
+    parser.add_argument('--tau_decay',type=float,default=1,
+                        help='the decay rate for tau, default 1 for no decay')
+    parser.add_argument('--tau_cut', type=float, default=0.05,
+                        help='min tau after decay')
+    parser.add_argument('--w_lambda_decay',type=float,default=1,
+                        help='the decay rate for w_lambda, default 1 for no decay')
+    parser.add_argument('--lambda_cut',type=float,default=0.05,
+                        help='min w_lambda after decay')
+    parser.add_argument('--freeze',type=int,default=0)
+    
+    parser.add_argument('--freeze_epoch',type=int,default=10)
+
+    
+    #new args: DICE
+    parser.add_argument("--int_weight", type=float, default=9)
+    parser.add_argument("--pop_weight", type=float, default=9)
+    parser.add_argument("--dis_pen", type=float, default=0.0001)
+    parser.add_argument("--margin", type=float, default=10)
+    parser.add_argument("--min_size", type=float, default=40)
+    parser.add_argument("--loss_decay", type=float, default=0.9)
+    parser.add_argument("--margin_decay", type=float, default=0.9)
+    parser.add_argument("--reg",type=float,default=0.01)
+    parser.add_argument("--embed_type",default="normalized")
+    parser.add_argument("--n_layer",type=int,default=0)
+    parser.add_argument("--inference_type",
+                        default="inner_product",
+                        help="Method to infer scores.")
+
     # parser.add_argument('--pop_partition_user', type=int, default=100, 
     #                     help='# of user popularity partition, -1 to set to max')  
     # parser.add_argument('--pop_partition_item', type=int, default=100, 

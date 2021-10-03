@@ -12,7 +12,7 @@ from time import time
 import collections
 
 class Data(object):
-    def __init__(self, path, batch_size, neg_sample):
+    def __init__(self, path, batch_size, neg_sample, args):
         self.path = path
         self.batch_size = batch_size
         self.neg_sample = neg_sample
@@ -49,53 +49,122 @@ class Data(object):
                     if len(items) != 0:
                         self.n_items = max(self.n_items, max(items))
                     self.n_test += len(items)
-        self.n_items += 1
-        self.n_users += 1
+        # self.n_items += 1
+        # self.n_users += 1
         self.print_statistics()
-        self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
+        
         self.train_items, self.test_set = {}, {}
-        self.test_item_set = collections.defaultdict(list)
+        self.test_item_list = collections.defaultdict(list)
+        self.test_user_list = collections.defaultdict(list)
         self.train_user_list = collections.defaultdict(list)
         self.train_item_list = collections.defaultdict(list)
-        self.users = list(range(self.n_users))
-        self.items = list(range(self.n_items))
+        self.valid_user_list = collections.defaultdict(list)
+        self.valid_item_list = collections.defaultdict(list)
+        self.test_id_user_list = collections.defaultdict(list)
+        self.test_id_item_list = collections.defaultdict(list)
+        
+        train_file = self.path + '/train.txt'
+        valid_file = self.path + '/valid.txt'
+        test_file = self.path + '/test.txt'
+        test_id_file=self.path + '/test_id.txt'
+        self.evalsets={}
+        with open(train_file) as f:
+            for line in f.readlines():
+                line = line.strip('\n').split(' ')
+                if len(line) == 0:
+                    continue
+                line = [int(i) for i in line]
+                user = line[0]
+                items = line[1:]
+                if (len(items)==0):
+                    continue
+                self.train_user_list[user] = items
+                for item in items:
+                    self.train_item_list[item].append(user)
+                self.n_users = max(self.n_users, user)
+                self.n_items = max(self.n_items, max(items))
+                self.n_train += len(items)
+        print('train')
+        print(max(self.train_user_list.keys()) + 1)
+        self.n_train_users = self.n_users
+        self.n_train_items = self.n_items
+        
 
         
-        with open(train_file) as f_train:
-            with open(test_file) as f_test:
-                for l in f_train.readlines():
-                    if len(l) == 0: break
-                    l = l.strip('\n')
-                    items = [int(i) for i in l.split(' ')]
-                    uid, train_items = items[0], items[1:]
 
-                    if len(train_items) == 0:
-                        continue
-                    for i in train_items:
-                        self.R[uid, i] = 1.
-                        
-                    self.train_items[uid] = train_items
+        with open(test_file) as f:
+            for line in f.readlines():
+                line = line.strip('\n').split(' ')
+                if len(line) == 0:
+                    continue
+                line = [int(i) for i in line]
+                user = line[0]
+                items = line[1:]
+                if len(items) == 0:
+                    continue
+                self.test_user_list[user] = items
+                for item in items:
+                    self.test_item_list[item].append(user)
+                self.n_users = max(self.n_users, user)
+                self.n_items = max(self.n_items, max(items))
+                self.n_test += len(items)
+        self.evalsets['test']= self.test_user_list
+        self.test_users = set(self.test_user_list.keys())
 
-                    self.train_user_list[uid] = train_items
-                    for item in train_items:
-                        self.train_item_list[item].append(uid)
-                    
-                for l in f_test.readlines():
-                    if len(l) == 0: break
-                    l = l.strip('\n')
-                    try:
-                        items = [int(i) for i in l.split(' ')]
-                    except Exception:
+        print('test')
+        print(max(self.test_user_list.keys()) + 1)
+        if ".new" in args.dataset:
+            with open(valid_file) as f:
+                for line in f.readlines():
+                    line = line.strip('\n').split(' ')
+                    if len(line) == 0:
                         continue
-                    
-                    uid, test_items = items[0], items[1:]
+                    line = [int(i) for i in line]
+                    user = line[0]
+                    items = line[1:]
+                    if len(items) == 0:
+                        continue
+                    self.valid_user_list[user] = items
+                    #self.valid_items.update(set(items))
+                    for item in items:
+                        self.valid_item_list[item].append(user)
+                    self.n_users = max(self.n_users, user)
+                    self.n_items = max(self.n_items, max(items))
+                    #self.n_valid += len(items)
+            self.valid_users = set(self.valid_user_list.keys())
+            self.evalsets['valid']= self.valid_user_list
 
-                    if len(test_items) == 0:
+            print('valid')
+            print(max(self.valid_user_list.keys()) + 1)
+
+
+            with open(test_id_file) as f:
+                for line in f.readlines():
+                    line = line.strip('\n').split(' ')
+                    if len(line) == 0:
                         continue
-                    self.test_set[uid] = test_items
-                    for item in test_items:
-                        self.test_item_set[item].append(uid) 
-        
+                    line = [int(i) for i in line]
+                    user = line[0]
+                    items = line[1:]
+                    if len(items) == 0:
+                        continue
+                    self.test_id_user_list[user] = items
+                    for item in items:
+                        self.test_id_item_list[item].append(user)
+                    self.n_users = max(self.n_users, user)
+                    self.n_items = max(self.n_items, max(items))
+                    self.n_test += len(items)
+            self.evalsets['test_id']= self.test_id_user_list
+
+
+            print('test_id')
+            print(max(self.test_id_user_list.keys()) + 1)
+
+        self.n_users = self.n_users + 1
+        self.n_items = self.n_items + 1
+        print(self.n_users)
+        print(self.n_items)
+            
         pop_user={key:len(value) for key,value in self.train_user_list.items()}
         pop_item={key:len(value) for key,value in self.train_item_list.items()}
         sorted_pop_user=list(set(list(pop_user.values())))
@@ -114,16 +183,72 @@ class Data(object):
             item_idx[item]=i
         self.user_pop_idx={}
         self.item_pop_idx={}
-        for key,value in pop_user.items():
-            self.user_pop_idx[key]=user_idx[value]
-        for key,value in pop_item.items():
-            self.item_pop_idx[key]=item_idx[value]
-        # for uid in range(self.n_users):
-        #     if self.train_items.__contains__(uid) and self.test_set.__contains__(uid):
-        #         if len(set(self.train_items[uid]) & set(self.test_set[uid]))!=0:
-        #             print(uid)
+        for i in range(self.n_users):
+            if i in pop_user:
+                self.user_pop_idx[i]=user_idx[pop_user[i]]
+            else:
+                self.user_pop_idx[i]=0
+        for i in range(self.n_items):
+            if i in pop_item:
+                self.item_pop_idx[i]=item_idx[pop_item[i]]
+            else:
+                self.item_pop_idx[i]=0
 
-    def get_adj_mat(self):
+        def get_degrees(dataset, n_node):
+            degrees = np.array(
+                [len(dataset[u]) if u in dataset else 0 for u in range(n_node)],
+                dtype=np.int32)
+            return degrees
+        
+        def invert_dict(d, sort=False):
+            inverse = {}
+            for key in d:
+                for value in d[key]:
+                    if value not in inverse:
+                        inverse[value] = [key]
+                    else:
+                        inverse[value].append(key)
+            return inverse
+
+        
+        self.train=self.train_user_list
+        self.train_inverse=invert_dict(self.train)
+
+        self.users = list(range(self.n_users))
+        self.items = list(range(self.n_items))
+        self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
+        self.R_pop = sp.dok_matrix((self.user_pop_num, self.item_pop_num), dtype=np.float32)
+
+
+        for u,items in self.train_user_list.items():
+            for i in items:
+                self.R[u,i]=1
+                self.R_pop[self.user_pop_idx[u],self.item_pop_idx[i]]=1
+
+
+
+        self.u_degrees = get_degrees(self.train, self.n_users)
+        self.i_degrees = get_degrees(self.train_inverse, self.n_items)
+ 
+        self.train = [
+            self.train_user_list[u] if u in self.train_user_list else []
+            for u in range(self.n_users)
+        ]
+        self.train_inverse = [
+            self.train_inverse[i] if i in self.train_inverse else []
+            for i in range(self.n_items)
+        ]
+        self.u_interacts = []
+        self.i_interacts = []
+        for u, items in enumerate(self.train):
+            for i in items:
+                self.u_interacts.append(u)
+                self.i_interacts.append(i)
+        self.u_interacts = np.array(self.u_interacts, dtype=np.int32)
+        self.i_interacts = np.array(self.i_interacts, dtype=np.int32)
+        self.n_interact = self.u_interacts.shape[0]
+            
+    def get_adj_mat(self,is_pop=False):
         # try:
         #     t1 = time()
         #     adj_mat = sp.load_npz(self.path + '/s_adj_mat.npz')
@@ -132,7 +257,7 @@ class Data(object):
         #     print('already load adj matrix', adj_mat.shape, time() - t1)
         
         # except Exception:
-        adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat()
+        adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat(is_pop)
         sp.save_npz(self.path + '/s_adj_mat.npz', adj_mat)
         sp.save_npz(self.path + '/s_norm_adj_mat.npz', norm_adj_mat)
         sp.save_npz(self.path + '/s_mean_adj_mat.npz', mean_adj_mat)
@@ -154,18 +279,31 @@ class Data(object):
             
         return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat
 
-    def create_adj_mat(self):
+    def create_adj_mat(self,is_pop=False):
         t1 = time()
-        adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
-        adj_mat = adj_mat.tolil()
-        R = self.R.tolil()
-        # prevent memory from overflowing
-        for i in range(5):
-            adj_mat[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5), self.n_users:] =\
-            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)]
-            adj_mat[self.n_users:,int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)] =\
-            R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)].T
-        adj_mat = adj_mat.todok()
+        if is_pop==False:
+            adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
+            adj_mat = adj_mat.tolil()
+            R = self.R.tolil()
+            # prevent memory from overflowing
+            for i in range(5):
+                adj_mat[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5), self.n_users:] =\
+                R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)]
+                adj_mat[self.n_users:,int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)] =\
+                R[int(self.n_users*i/5.0):int(self.n_users*(i+1.0)/5)].T
+            adj_mat = adj_mat.todok()
+        else:
+            adj_mat = sp.dok_matrix((self.user_pop_num + self.item_pop_num, self.user_pop_num + self.item_pop_num), dtype=np.float32)
+            adj_mat = adj_mat.tolil()
+            R = self.R_pop.tolil()
+            # prevent memory from overflowing
+            for i in range(5):
+                adj_mat[int(self.user_pop_num*i/5.0):int(self.user_pop_num*(i+1.0)/5), self.user_pop_num:] =\
+                R[int(self.user_pop_num*i/5.0):int(self.user_pop_num*(i+1.0)/5)]
+                adj_mat[self.user_pop_num:,int(self.user_pop_num*i/5.0):int(self.user_pop_num*(i+1.0)/5)] =\
+                R[int(self.user_pop_num*i/5.0):int(self.user_pop_num*(i+1.0)/5)].T
+            adj_mat = adj_mat.todok()
+
         print('already create adjacency matrix', adj_mat.shape, time() - t1)
         
         t2 = time()
@@ -210,7 +348,7 @@ class Data(object):
 
 
         def sample_pos_items_for_u(u, num):
-            pos_items = list(self.train_items[u])
+            pos_items = list(self.train_user_list[u])
             n_pos_items = len(pos_items)
             pos_batch = []
             while True:
@@ -227,12 +365,12 @@ class Data(object):
             while True:
                 if len(neg_items) == num: break
                 neg_id = np.random.randint(low=0, high=self.n_items,size=1)[0]
-                if neg_id not in self.train_items[u] and neg_id not in neg_items:
+                if neg_id not in self.train_user_list[u] and neg_id not in neg_items:
                     neg_items.append(neg_id)
             return neg_items
 
         def sample_neg_items_for_u_from_pools(u, num):
-            neg_items = list(set(self.neg_pools[u]) - set(self.train_items[u]))
+            neg_items = list(set(self.neg_pools[u]) - set(self.train_user_list[u]))
             return rd.sample(neg_items, num)
 
         pos_items, neg_items = [], []

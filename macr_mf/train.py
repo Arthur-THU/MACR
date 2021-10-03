@@ -11,11 +11,14 @@ from time import time
 import multiprocessing
 from tqdm import tqdm
 from scipy.special import softmax, expit
-from model import BPRMF, CausalE, IPS_BPRMF, BIASMF, DYNMF
+from model import BPRMF, CausalE, IPS_BPRMF, BIASMF, DYNMF, DICE
 from batch_test import *
 from matplotlib import pyplot as plt
-
+from copy import deepcopy
+from evaluator import ProxyEvaluator
 cores = multiprocessing.cpu_count() // 2
+
+
 
 
 
@@ -120,78 +123,89 @@ def get_performance(user_pos_test, r, Ks):
 def test_one_user(x):
     # user u's ratings for user u
     rating = x[0]
-    #uid
+    # uid
     u = x[1]
-    #user u's items in the training set
+    # user u's items in the training set
     try:
-        training_items = data.train_user_list[u]
+        training_items = train_user_set[u]
     except Exception:
         training_items = []
-    #user u's items in the test set
-    user_pos_test = data.test_user_list[u]
 
-    all_items = set(range(ITEM_NUM))
+    # user u's items in the test set
+    user_pos_test = test_user_set[u]
+
+    all_items = set(range(0, ITEM_NUM))
     test_items = list(all_items - set(training_items))
-
 	#r为预测命中与否的集合，0未命中，1命中
     r = ranklist_by_sorted(user_pos_test, test_items, rating, Ks)
 
     return get_performance(user_pos_test, r, Ks)
 
     
-def valid_one_user(x):
-    # user u's ratings for user u
-    rating = x[0]
-    #uid
-    u = x[1]
-    #user u's items in the training set
-    try:
-        training_items = data.train_user_list[u]
-    except Exception:
-        training_items = []
-    #user u's items in the test set
-    user_pos_valid = data.valid_user_list[u]
+# def valid_one_user(x):
+#     # user u's ratings for user u
+#     rating = x[0]
+#     #uid
+#     u = x[1]
+#     #user u's items in the training set
+#     valid_items=x[2]
+#     # try:
+#     #     training_items = data.train_user_list[u]
+#     # except Exception:
+#     #     training_items = []
+#     # #user u's items in the test set
+#     user_pos_valid = data.valid_user_list[u]
 
-    all_items = set(range(ITEM_NUM))
-    valid_items = list(all_items - set(training_items))
+#     # all_items = set(range(ITEM_NUM))
+#     # valid_items = list(all_items - set(training_items))
 
-	#r为预测命中与否的集合，0未命中，1命中
-    r = ranklist_by_sorted(user_pos_valid, valid_items, rating, Ks)
+# 	#r为预测命中与否的集合，0未命中，1命中
+#     r = ranklist_by_sorted(user_pos_valid, valid_items, rating, Ks)
 
-    return get_performance(user_pos_valid, r, Ks)
+#     return get_performance(user_pos_valid, r, Ks)
 
-def test(sess, model, test_users, batch_test_flag = False, model_type = 'o', valid_set="test", item_pop_test=None, pop_exp = 0):
+def test(sess, dt, model, batch_test_flag = False, model_type = 'o', valid_set="test", item_pop_test=None, pop_exp = 0):
 
     result = {'precision': np.zeros(len(Ks)), 'recall': np.zeros(len(Ks)), 'ndcg': np.zeros(len(Ks)),
               'hit_ratio': np.zeros(len(Ks))}
+              
 
+    global train_user_set, test_user_set
+
+
+    train_user_set = deepcopy(dt.train_user_list)
+    if valid_set=="test":
+        test_user_set = deepcopy(dt.test_user_list)
+    else:
+        test_user_set = deepcopy(dt.valid_user_list)
+    
 
     pool = multiprocessing.Pool(cores)
 
     u_batch_size = BATCH_SIZE
     i_batch_size = BATCH_SIZE
 
+    test_users = list(test_user_set.keys())
     n_test_users = len(test_users)
     n_user_batchs = n_test_users // u_batch_size + 1
 
     count = 0
 
 
-    total_rate = np.empty(shape=[0, ITEM_NUM])
-    for u_batch_id in range(n_user_batchs):
+    #total_rate = np.empty(shape=[0, ITEM_NUM])
+    for u_batch_id in tqdm(range(n_user_batchs)):
 
         start = u_batch_id * u_batch_size
         end = (u_batch_id + 1) * u_batch_size
 
         user_batch = test_users[start: end]
-
+        #print("start.")
         if batch_test_flag:
 
             n_item_batchs = ITEM_NUM // i_batch_size + 1
             rate_batch = np.zeros(shape=(len(user_batch), ITEM_NUM))
-
             i_count = 0
-            for i_batch_id in range(n_item_batchs):
+            for i_batch_id in tqdm(range(n_item_batchs)):
                 i_start = i_batch_id * i_batch_size
                 i_end = min((i_batch_id + 1) * i_batch_size, ITEM_NUM)
 
@@ -225,7 +239,7 @@ def test(sess, model, test_users, batch_test_flag = False, model_type = 'o', val
             if model_type == 'o':
                 rate_batch = sess.run(model.batch_ratings, {model.users: user_batch,
                                                                 model.pos_items: item_batch})
-                total_rate = np.vstack((total_rate, rate_batch))
+                #total_rate = np.vstack((total_rate, rate_batch))
             elif model_type == 'c':
                 rate_batch = sess.run(model.user_const_ratings, {model.users: user_batch,
                                                                 model.pos_items: item_batch})
@@ -259,29 +273,35 @@ def test(sess, model, test_users, batch_test_flag = False, model_type = 'o', val
                 print('model type error.')
                 exit()
         
-        item_acc_list = {}
+
+        #print("end.")
+        # item_acc_list = {}
         rate_batch = np.array(rate_batch)# (B, N)
-        for i in range(ITEM_NUM):
-            item_acc_list[i] = 0
+        # for i in range(ITEM_NUM):
+        #     item_acc_list[i] = 0
         all_items = set(range(ITEM_NUM))
-        for j,rate_user in enumerate(rate_batch):
-            user = user_batch[j]
-            user_pos_test = data.test_user_list[user]
-            train_items = data.train_user_list[user]
-            test_items = list(all_items - set(train_items))
-            item_score = dict()
-            for i in test_items:
-                item_score[i] = rate_user[i]
-            K_max_item_score = heapq.nlargest(5, item_score, key = item_score.get)
-            for i in K_max_item_score:
-                if i in user_pos_test:
-                    item_acc_list[i] += 1/len(data.test_item_list[i])
+        test_item_batch=[]
+        # for j,rate_user in enumerate(rate_batch):
+        #     user = user_batch[j]
+        #     user_pos_test = data.test_user_list[user]
+        #     train_items = data.train_user_list[user]
+        #     test_items = list(all_items - set(train_items))
+        #     test_item_batch.append(test_items)
+            # item_score = dict()
+            # for i in test_items:
+            #     item_score[i] = rate_user[i]
+            # K_max_item_score = heapq.nlargest(5, item_score, key = item_score.get)
+            # for i in K_max_item_score:
+            #     if i in user_pos_test:
+            #         item_acc_list[i] += 1/len(data.test_item_list[i])
 
         user_batch_rating_uid = zip(rate_batch, user_batch)
-        if valid_set=="test":
-            batch_result = pool.map(test_one_user, user_batch_rating_uid)
-        else:
-            batch_result = pool.map(valid_one_user, user_batch_rating_uid)
+        #batch_result=[]
+        # for x in tqdm(user_batch_rating_uid):
+        #     perf=test_one_user(x)
+        #     batch_result.append(perf)
+
+        batch_result = pool.map(test_one_user, user_batch_rating_uid)
         count += len(batch_result)
 
         for re in batch_result:
@@ -290,20 +310,20 @@ def test(sess, model, test_users, batch_test_flag = False, model_type = 'o', val
             result['ndcg'] += re['ndcg']/n_test_users
             result['hit_ratio'] += re['hit_ratio']/n_test_users
     # print(result['hit_ratio'])
-    if model_type == 'o':
-        # print('zk:', total_rate.shape, np.mean(total_rate))
-        rate_sum, n = 0, 0
-        # print(test_users)
-        for user, items in data.train_user_list.items():
-            if user not in test_users:
-                continue
-            idx = 0
-            for u_id in test_users:
-                if u_id == user:
-                    break
-                idx += 1
-            rate_sum += np.sum(total_rate[idx,items])
-            n += len(items)
+    # if model_type == 'o':
+    #     # print('zk:', total_rate.shape, np.mean(total_rate))
+    #     rate_sum, n = 0, 0
+    #     # print(test_users)
+    #     for user, items in train_user_set.items():
+    #         if user not in test_users:
+    #             continue
+    #         idx = 0
+    #         for u_id in test_users:
+    #             if u_id == user:
+    #                 break
+    #             idx += 1
+    #         rate_sum += np.sum(total_rate[idx,items])
+    #         n += len(items)
         # print('pos rating:', rate_sum/n*1.0)
 
 
@@ -312,8 +332,10 @@ def test(sess, model, test_users, batch_test_flag = False, model_type = 'o', val
     return result
 
 def early_stop(hr, ndcg, recall, precision, cur_epoch, config, stopping_step, flag_step = 10):
+    flag=0
     if hr >= config['best_hr']:
         stopping_step = 0
+        flag=1
         config['best_hr'] = hr
         config['best_ndcg'] = ndcg
         config['best_recall'] = recall
@@ -328,7 +350,7 @@ def early_stop(hr, ndcg, recall, precision, cur_epoch, config, stopping_step, fl
     else:
         should_stop = False
 
-    return config, stopping_step, should_stop
+    return config, stopping_step, should_stop, flag
 
 
 def ensureDir(dir_path):
@@ -336,9 +358,44 @@ def ensureDir(dir_path):
     if not os.path.exists(d):
         os.makedirs(d)
 
+
+def merge_user_list(user_lists):
+    out=collections.defaultdict(list)
+    for user_list in user_lists:
+        for key, item in user_list.items():
+            out[key]=out[key]+item
+    return out
+
+
 if __name__ == '__main__':
     # random.seed(123)
     # tf.set_random_seed(123)
+    #if args.valid_set=="test":
+    pop_dict={}
+    for user,items in data.train_user_list.items():
+        for item in items:
+            if item not in pop_dict:
+                pop_dict[item]=0
+            pop_dict[item]+=1
+    
+    sort_pop=sorted(pop_dict.items(), key=lambda item: item[1],reverse=True)
+    pop_mask=[item[0] for item in sort_pop[:20]]
+    print(pop_mask)
+
+
+    if "new" in args.dataset:
+        if args.model!="pop_test":
+            eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_id_user_list]))
+            eval_test_id = ProxyEvaluator(data,data.train_user_list,data.test_id_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_user_list]))
+            eval_valid = ProxyEvaluator(data,data.train_user_list,data.valid_user_list,top_k=Ks)
+        else:
+            eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_id_user_list]),pop_mask=pop_mask)
+            eval_test_id = ProxyEvaluator(data,data.train_user_list,data.test_id_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_user_list]),pop_mask=pop_mask)
+            eval_valid = ProxyEvaluator(data,data.train_user_list,data.valid_user_list,top_k=Ks,pop_mask=pop_mask)
+    else:
+        eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks)
+        eval_test_id = None
+        eval_valid = eval_test_ood
     if args.save_flag==1:
         weights_save_path='{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)
         ensureDir(weights_save_path)
@@ -350,7 +407,10 @@ if __name__ == '__main__':
     model_type = ''
     if args.model == 'mf' or (args.model == 'CausalE' and args.skew == 2):
         model_type = 'mf'
-        model = BPRMF(args, config)
+        if args.train=="infonce":
+            model = DYNMF(args,config,data.user_pop_num,data.item_pop_num)
+        else:
+            model = BPRMF(args, config)
         print('MF model.')
     elif args.model == 'CausalE':
         model_type = 'CausalE'
@@ -367,14 +427,18 @@ if __name__ == '__main__':
             if item not in p_matrix.keys():
                 p_matrix[item] = 1/(data.n_users+1)
             p.append(p_matrix[item])
-        # print(p)
+        print(p)
         model = IPS_BPRMF(args, config, p)
         print('IPS_MF model.')
+    elif args.model == 'dice':
+        model_type = 'dice'
+        model = DICE(args,data)
+        print("DICE model.")
     elif args.model == 'biasmf':
         model_type = 'mf'
         model = BIASMF(args, config)
         print('BIASMF model.')
-    elif args.model == "dynmf":
+    elif args.model == "dynmf" or args.model =="pop_test":
         model_type = 'dynmf'
         model=DYNMF(args,config,data.user_pop_num,data.item_pop_num)
         print('DYNMF model')
@@ -389,8 +453,37 @@ if __name__ == '__main__':
     sess = tf.Session(config = gpu_config)
     sess.run(tf.global_variables_initializer())
 
+    
+    model.add_sess(sess)
+
+    if args.model=='pop_test':
+        if "new" in args.dataset: 
+            names=["valid","test_ood","test_id"]
+            test_trials=[eval_valid,eval_test_ood,eval_test_id]
+        else:
+            names=["valid"]
+            test_trials=[eval_valid]
+        for w,eval in enumerate(test_trials):
+            ret, _ = eval.evaluate(model)
+            print(ret)
+
+            n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+            #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+            ret=n_ret
+            perf_str = 'pop_test, split=[%s], recall=[%.5f, %.5f], ' \
+                'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+                (names[w], ret['recall'][0], ret['recall'][-1],
+                    ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                    ret['ndcg'][0], ret['ndcg'][-1])
+            print(perf_str)
+                # with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                #     f.write(perf_str+"\n")
+        
+
+
+
     #-----------CausalE----------
-    if model_type == 'CausalE':
+    elif model_type == 'CausalE':
         if args.pretrain == 0:
             t0 = time()
             loss_loger, pre_loger, rec_loger, ndcg_loger, auc_loger, hit_loger = [], [], [], [], [], []
@@ -402,7 +495,7 @@ if __name__ == '__main__':
                 loss, mf_loss, reg_loss, cf_loss = 0., 0., 0., 0.
                 n_batch = data.n_train // args.batch_size + 1
 
-                for idx in range(n_batch):
+                for idx in tqdm(range(n_batch)):
                     users, pos_items, neg_items = data.sample()
                     items = pos_items + neg_items
                     reg_ids = compute_2i_regularization_id(items, ITEM_NUM)
@@ -426,70 +519,266 @@ if __name__ == '__main__':
                     if args.verbose > 0 and epoch % args.verbose == 0:
                         perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss, reg_loss, cf_loss)
                         print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
                     continue
 
                 t2 = time()
-                users_to_test = list(data.test_user_list.keys())
-                ret = test(sess, model, users_to_test)
+                #users_to_test = list(data.test_user_list.keys())
+                ret, _ = eval_valid.evaluate(model)
+                # ret = test(sess, model, users_to_test)
                 t3 = time()
+                print(ret)
 
+                n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                ret=n_ret
                 loss_loger.append(loss)
                 rec_loger.append(ret['recall'][0])
                 pre_loger.append(ret['precision'][0])
                 ndcg_loger.append(ret['ndcg'][0])
                 hit_loger.append(ret['hit_ratio'][0])
-
                 if args.verbose > 0:
-                    perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.5f=%.5f + %.5f + %.5f], recall=[%.5f, %.5f], ' \
+                    perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
                             'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                            (epoch, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, cf_loss, ret['recall'][0], ret['recall'][-1],
+                            (epoch, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
                                 ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                 ret['ndcg'][0], ret['ndcg'][-1])
                     print(perf_str)
+                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                        f.write(perf_str+"\n")
 
                 # *********************************************************
                 # save the user & item embeddings for pretraining.
-                config, stopping_step, should_stop = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
+                config, stopping_step, should_stop, best_flag = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
                 if args.save_flag == 1:
                     if os.path.exists('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)) == False:
                         os.makedirs('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID))
-                    saver.save(sess, '{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch))
+                    saver.save(sess, '{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch))
+                    if best_flag:
+                        config['best_name']='{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch)
 
                 if should_stop:
                     print("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
                     logging.info("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
                     break
+            
+
+            print('#loading best models at epoch {}'.format(config['best_epoch']))
+            saver.restore(sess, config['best_name'])
+            ret, _ = eval_test_ood.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_ood: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+
+            if "new" in args.dataset:
+                ret, _ = eval_test_id.evaluate(model)
+                n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+                ret=n_ret
+                perf_str = 'test_id: recall={}, ' \
+                                    'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                        str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+                print(perf_str)
+                with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                    f.write(perf_str+"\n")
+                    
         else:
             pass
             # print('#load existing models.')
             # model_file = tf.train.latest_checkpoint('{}_{}_checkpoint/wd_{}_lr_{}/'.format(args.model, args.dataset, args.wd, args.lr))
             # saver.restore(sess, model_file)
-    
+    elif model_type=="dice":
+        if args.pretrain==0:
+            t0 = time()
+            loss_loger, pre_loger, rec_loger, ndcg_loger, auc_loger, hit_loger = [], [], [], [], [], []
+            config["best_hr"], config["best_ndcg"], config['best_recall'], config['best_pre'], config["best_epoch"] = 0, 0, 0, 0, 0
+            #config['best_tau_hr'], config['best_tau_epoch'], config['best_tau'] = 0, 0, 0.0
+            stopping_step = 0
+            cur_tau=args.tau
+            cur_w_lambda=args.w_lambda
+
+            perf=model.eval(args)
+            ret, _ = eval_valid.evaluate(model)
+            print(ret)
+            #ret, _ = eval_valid.evaluate(model)
+            
+            t3 = time()
+            #print(ret)
+
+            for epoch in range(args.epoch):
+                t1 = time()
+                perf=model.train_1_epoch(args)
+                # print the test evaluation metrics each 10 epochs; pos:neg = 1:10.
+                if (epoch + 1) % args.log_interval != 0:
+                    if args.verbose > 0 and epoch % args.verbose == 0:
+                        perf_str = 'Epoch %d [%.1fs]: ' % (epoch, time()-t1) + perf
+                        print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
+                    continue
+                t2 = time()
+                # start testing
+                # if args.valid_set=="test":
+                #for tau in np.linspace(args.start, args.end, args.step):
+                #model.update_tau(sess, tau)
+
+                
+                
+                if "new" in args.dataset: 
+                    names=["valid","test_ood","test_id"]
+                    test_trials=[eval_valid,eval_test_ood,eval_test_id]
+                else:
+                    names=["valid"]
+                    test_trials=[eval_valid]
+                for w,eval in enumerate(test_trials):
+                    ret, _ = eval.evaluate(model)
+                    t3 = time()
+
+                    n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                    #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                    ret=n_ret
+                    if w==0:
+                        rec_loger.append(ret['recall'][0])
+                        pre_loger.append(ret['precision'][0])
+                        ndcg_loger.append(ret['ndcg'][0])
+                        hit_loger.append(ret['hit_ratio'][0])
+
+                        
+                        best_hr = ret['hit_ratio'][0]
+                        best_recall=ret['recall'][0]
+                        best_pre=ret['precision'][0]
+                        best_ndcg=ret['ndcg'][0]
+
+                    if args.verbose > 0:
+                        perf_str = 'Epoch %d [%.1fs + %.1fs]: %s split=[%s], recall=[%.5f, %.5f], ' \
+                            'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+                            (epoch, t2 - t1, t3 - t2, perf, names[w], ret['recall'][0], ret['recall'][-1],
+                                ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                                ret['ndcg'][0], ret['ndcg'][-1])
+                        print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
+                model.eval(args)
+                        
+                # *********************************************************
+                # save the user & item embeddings for pretraining.
+                config, stopping_step, should_stop, best_flag = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
+                if args.save_flag == 1:
+                    if os.path.exists('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)) == False:
+                        os.makedirs('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID))
+                    saver.save(sess, '{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch))
+                    if best_flag:
+                        config['best_name']='{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch)
+                if should_stop and args.early_stop == 1:
+                    print("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
+                    logging.info("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
+
+                    with open('{}_{}_checkpoint/wd_{}_lr_{}_{}/best_epoch.txt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID),'w') as f:
+                        print(config['best_epoch'], file = f)
+                    break
+            
+            # test ood/id
+            saver.restore(sess, config['best_name'])
+            ret, _ = eval_test_ood.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_ood: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+            
+            if "new" in args.dataset:
+                ret, _ = eval_test_id.evaluate(model)
+                n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+                ret=n_ret
+                perf_str = 'test_id: recall={}, ' \
+                                    'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                        str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+                print(perf_str)
+                with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                    f.write(perf_str+"\n")
+        else:
+            print('#load existing models.')
+
+            model_file = '/storage/wcma/MACR/macr_mf/CPR_out/model/_epoch_1000'
+            saver.restore(sess, model_file)
+            perf=model.eval(args)
+            print(perf)
+
+            #print('#loading best models at epoch {}'.format(config['best_epoch'])
+            ret, _ = eval_test_ood.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_ood: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+            
+            if "new" in args.dataset:
+                ret, _ = eval_test_id.evaluate(model)
+                n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+                ret=n_ret
+                perf_str = 'test_id: recall={}, ' \
+                                    'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                        str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+                print(perf_str)
+                with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                    f.write(perf_str+"\n")
+
+            print(perf_str)
+
+
+        
+
     #Our dynmf model
     elif model_type=="dynmf":
         if args.pretrain == 0:
             t0 = time()
             loss_loger, pre_loger, rec_loger, ndcg_loger, auc_loger, hit_loger = [], [], [], [], [], []
             config["best_hr"], config["best_ndcg"], config['best_recall'], config['best_pre'], config["best_epoch"] = 0, 0, 0, 0, 0
-            config['best_c_hr'], config['best_c_epoch'], config['best_c'] = 0, 0, 0.0
+            #config['best_tau_hr'], config['best_tau_epoch'], config['best_tau'] = 0, 0, 0.0
             stopping_step = 0
+            cur_tau=args.tau
+            cur_w_lambda=args.w_lambda
 
             for epoch in range(args.epoch):
                 t1 = time()
                 loss, mf_loss1, mf_loss2, reg_loss  = 0., 0., 0., 0.
                 n_batch = data.n_train // args.batch_size + 1
+                if epoch >= args.warm_up:
+                    if cur_tau > args.tau_cut:
+                        cur_tau=cur_tau*args.tau_decay
+                        model.update_tau(sess, cur_tau)
+                    if cur_w_lambda > args.lambda_cut:
+                        cur_w_lambda=cur_w_lambda*args.w_lambda_decay
+                        model.update_lambda(sess,cur_w_lambda)
                 
+
+                cur_opt=model.opt
+                if args.freeze==1:
+                    if epoch<args.freeze_epoch:
+                        cur_opt=model.opt_freeze
+                    else:
+                        cur_opt=model.opt_none_freeze
+
 
                 for idx in tqdm(range(n_batch)):
                     users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = data.sample_infonce(data.user_pop_idx,data.item_pop_idx)
-                    if args.train=="normal":
-                        _, batch_loss, batch_mf_loss1, batch_mf_loss2, batch_reg_loss = sess.run([model.opt, model.loss, model.mf_loss1, model.mf_loss2,model.reg_loss],
-                                        feed_dict = {model.users: users,
-                                                    model.pos_items: pos_items,
-                                                    model.neg_items: neg_items,
-                                                    model.users_pop: users_pop,
-                                                    model.pos_items_pop: pos_items_pop,
-                                                    model.neg_items_pop: neg_items_pop})
+                    _, batch_loss, batch_mf_loss1, batch_mf_loss2, batch_reg_loss = sess.run([cur_opt, model.loss, model.mf_loss1, model.mf_loss2,model.reg_loss],
+                                    feed_dict = {model.users: users,
+                                                model.pos_items: pos_items,
+                                                model.neg_items: neg_items,
+                                                model.users_pop: users_pop,
+                                                model.pos_items_pop: pos_items_pop,
+                                                model.neg_items_pop: neg_items_pop})
                     mf_loss1 += batch_mf_loss1/n_batch
                     mf_loss2 += batch_mf_loss2/n_batch
                     reg_loss += batch_reg_loss/n_batch
@@ -501,155 +790,105 @@ if __name__ == '__main__':
                 # print the test evaluation metrics each 10 epochs; pos:neg = 1:10.
                 if (epoch + 1) % args.log_interval != 0:
                     if args.verbose > 0 and epoch % args.verbose == 0:
-                        perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss1, mf_loss2, reg_loss)
+                        perf_str = 'Epoch %d [%.1fs]: tau, lambda==[%.2f, %.2f], train==[%.5f=%.5f + %.5f + %.5f]' % (epoch, time()-t1, cur_tau, cur_w_lambda, loss, mf_loss1, mf_loss2, reg_loss)
                         print(perf_str)
                         with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                             f.write(perf_str+"\n")
                     continue
-
                 t2 = time()
-                if args.valid_set=="test":
-                    users_to_test = list(data.test_user_list.keys())
-                elif args.valid_set=="valid":
-                    users_to_test = list(data.valid_user_list.keys())
                 # start testing
-                if args.test=="normal" or args.test == 'rubi_user_wise':
-                    if args.valid_set=="test":
-                        ret = test(sess, model, users_to_test, valid_set="test")
-                    elif args.valid_set=="valid":
-                        ret = test(sess, model, users_to_test, valid_set="valid")
-                    # ret = test(sess, model, users_to_test)
+                # if args.valid_set=="test":
+                #for tau in np.linspace(args.start, args.end, args.step):
+                #model.update_tau(sess, tau)
+                
+                if "new" in args.dataset: 
+                    names=["valid","test_ood","test_id"]
+                    test_trials=[eval_valid,eval_test_ood,eval_test_id]
+                else:
+                    names=["valid"]
+                    test_trials=[eval_valid]
+                for w,eval in enumerate(test_trials):
+                    ret, _ = eval.evaluate(model)
                     t3 = time()
-                    loss_loger.append(loss)
-                    rec_loger.append(ret['recall'][0])
-                    pre_loger.append(ret['precision'][0])
-                    ndcg_loger.append(ret['ndcg'][0])
-                    hit_loger.append(ret['hit_ratio'][0])
+                    print(ret)
+
+                    n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                    #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                    ret=n_ret
+                    if w==0:
+                        loss_loger.append(loss)
+                        rec_loger.append(ret['recall'][0])
+                        pre_loger.append(ret['precision'][0])
+                        ndcg_loger.append(ret['ndcg'][0])
+                        hit_loger.append(ret['hit_ratio'][0])
+
+
+                        best_hr = ret['hit_ratio'][0]
+                        best_recall=ret['recall'][0]
+                        best_pre=ret['precision'][0]
+                        best_ndcg=ret['ndcg'][0]
+
                     if args.verbose > 0:
-                        perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f + %.8f], recall=[%.5f, %.5f], ' \
-                                'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                                (epoch, t2 - t1, t3 - t2, loss, mf_loss1, mf_loss2, reg_loss, ret['recall'][0], ret['recall'][-1],
-                                    ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                    ret['ndcg'][0], ret['ndcg'][-1])
+                        perf_str = 'Epoch %d [%.1fs + %.1fs]: tau, lambda==[%.2f, %.2f], train==[%.8f=%.8f + %.8f + %.8f], split=[%s], recall=[%.5f, %.5f], ' \
+                            'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+                            (epoch, t2 - t1, t3 - t2, cur_tau, cur_w_lambda, loss, mf_loss1, mf_loss2, reg_loss, names[w], ret['recall'][0], ret['recall'][-1],
+                                ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                                ret['ndcg'][0], ret['ndcg'][-1])
                         print(perf_str)
                         with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                             f.write(perf_str+"\n")
-                elif args.test=="rubi":
-                    print('Epoch %d'%(epoch))
-                    best_c = 0
-                    best_hr = 0
-                    best_recall=0
-                    best_ndcg=0
-                    best_pre=0
-                    for c in np.linspace(args.start, args.end, args.step):
-                        model.update_c(sess, c)
-                        if args.valid_set=="test":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="test")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="test")
-                        elif args.valid_set=="valid":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="valid")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="valid")
-                        t3 = time()
-                        loss_loger.append(loss)
-                        rec_loger.append(ret['recall'][0])
-                        pre_loger.append(ret['precision'][0])
-                        ndcg_loger.append(ret['ndcg'][0])
-                        hit_loger.append(ret['hit_ratio'][0])
-
-                        if ret['hit_ratio'][0] > best_hr:
-                            best_hr = ret['hit_ratio'][0]
-                            best_recall=ret['recall'][0]
-                            best_pre=ret['precision'][0]
-                            best_ndcg=ret['ndcg'][0]
-                            best_c = c
-
-                        if args.verbose > 0:
-                            perf_str = 'c:%.2f [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
-                                    'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                                    (c, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
-                                        ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                        ret['ndcg'][0], ret['ndcg'][-1])
-                            print(perf_str)
-                    
-                    for c in np.linspace(best_c-1, best_c+1,1):
-                        model.update_c(sess, c)
-                        if args.valid_set=="test":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="test")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="test")
-                        elif args.valid_set=="valid":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="valid")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="valid")
-                        t3 = time()
-                        loss_loger.append(loss)
-                        rec_loger.append(ret['recall'][0])
-                        pre_loger.append(ret['precision'][0])
-                        ndcg_loger.append(ret['ndcg'][0])
-                        hit_loger.append(ret['hit_ratio'][0])
-
-                        if args.verbose > 0:
-                            perf_str = 'c:%.2f [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
-                                    'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                                    (c, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
-                                        ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                        ret['ndcg'][0], ret['ndcg'][-1])
-                            print(perf_str)
-
-                        if ret['hit_ratio'][0] > best_hr:
-                            best_hr = ret['hit_ratio'][0]
-                            best_recall=ret['recall'][0]
-                            best_pre=ret['precision'][0]
-                            best_ndcg=ret['ndcg'][0]
-                            best_c = c
-
-                        if ret['hit_ratio'][0] > config['best_c_hr']:
-                            config['best_c_hr'] = ret['hit_ratio'][0]
-                            config['best_c_ndcg'] = ret['ndcg'][0]
-                            config['best_c_precision'] = ret['precision'][0]
-                            config['best_c_recall'] = ret['recall'][0]
-                            config['best_c_epoch'] = epoch
-                            config['best_c'] = c
-
-                    ret['hit_ratio'][0]=best_hr
-                    ret['recall'][0]=best_recall
-                    ret['precision'][0]=best_pre
-                    ret['ndcg'][0]=best_ndcg
-
+                        
                 # *********************************************************
                 # save the user & item embeddings for pretraining.
-                config, stopping_step, should_stop = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
+                config, stopping_step, should_stop, best_flag = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
                 if args.save_flag == 1:
                     if os.path.exists('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)) == False:
                         os.makedirs('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID))
                     saver.save(sess, '{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch))
-
+                    if best_flag:
+                        config['best_name']='{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch)
                 if should_stop and args.early_stop == 1:
                     print("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
                     logging.info("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
 
                     with open('{}_{}_checkpoint/wd_{}_lr_{}_{}/best_epoch.txt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID),'w') as f:
                         print(config['best_epoch'], file = f)
-
-                    if args.test=='rubi':
-                        with open('{}_{}_checkpoint/wd_{}_lr_{}_{}/best_c.txt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID),'w') as f:
-                            print(config['best_c'], file = f)
-
                     break
+            
+            # test ood/id
+            print('#loading best models at epoch {}'.format(config['best_epoch']))
+            saver.restore(sess, config['best_name'])
+            ret, _ = eval_test_ood.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_ood: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+            
+            if "new" in args.dataset:
+                ret, _ = eval_test_id.evaluate(model)
+                n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+                ret=n_ret
+                perf_str = 'test_id: recall={}, ' \
+                                    'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                        str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+                print(perf_str)
+                with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                    f.write(perf_str+"\n")
+
+        
+
+            
         # pretrain
         else:
             print('#load existing models.')
 
             model_file = 'mf_addressa_checkpoint/wd_1e-05_lr_0.001_mfnormalbce/669_ckpt.ckpt'
             saver.restore(sess, model_file)
-            users_to_test = list(data.test_user_list.keys())
-            ret = test(sess, model, users_to_test, valid_set="test")
+            ret = test(sess, data, model, valid_set="test")
             perf_str = ' recall={}, ' \
                                     'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
                                         str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
@@ -672,13 +911,28 @@ if __name__ == '__main__':
                 n_batch = data.n_train // args.batch_size + 1
                 
 
-                for idx in range(n_batch):
-                    users, pos_items, neg_items = data.sample()
+                for idx in tqdm(range(n_batch)):
+                    if args.train!="infonce":
+                        users, pos_items, neg_items = data.sample()
+                    else:
+                        users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = data.sample_infonce(data.user_pop_idx,data.item_pop_idx)
+
                     if args.train=="normal":
-                        _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt, model.loss, model.mf_loss, model.reg_loss],
+                        _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt_mf,model.mf_loss, model.mf_loss_ori, model.reg_loss_norm],
                                         feed_dict = {model.users: users,
                                                     model.pos_items: pos_items,
                                                     model.neg_items: neg_items})
+                        #print(debug)
+                        #input()
+                    elif args.train=="infonce":
+                        _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt,model.loss, model.mf_loss, model.reg_loss],
+                                        feed_dict = {model.users: users,
+                                                model.pos_items: pos_items,
+                                                model.neg_items: neg_items,
+                                                model.users_pop: users_pop,
+                                                model.pos_items_pop: pos_items_pop,
+                                                model.neg_items_pop: neg_items_pop})
+
                     elif args.train=="rubi":
                         _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt_two, model.loss_two, model.mf_loss_two, model.reg_loss_two],
                                         feed_dict = {model.users: users,
@@ -699,7 +953,7 @@ if __name__ == '__main__':
                                         feed_dict = {model.users: users,
                                                     model.pos_items: pos_items,
                                                     model.neg_items: neg_items})    
-                        # print(batch_mf_loss, batch_reg_loss) 
+                        # print(batch_mf_loss, batch_reg_loss)
                     # _, batch_loss, batch_mf_loss, batch_reg_loss = sess.run([model.opt_two_bce, model.loss_two_bce, model.mf_loss_ori, model.mf_loss_item],
                     #             feed_dict = {model.users: users,
                     #                         model.pos_items: pos_items,
@@ -724,21 +978,20 @@ if __name__ == '__main__':
                     if args.verbose > 0 and epoch % args.verbose == 0:
                         perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f]' % (epoch, time()-t1, loss, mf_loss, reg_loss)
                         print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
                     continue
 
                 t2 = time()
-                if args.valid_set=="test":
-                    users_to_test = list(data.test_user_list.keys())
-                elif args.valid_set=="valid":
-                    users_to_test = list(data.valid_user_list.keys())
                 # start testing
                 if args.test=="normal" or args.test == 'rubi_user_wise':
-                    if args.valid_set=="test":
-                        ret = test(sess, model, users_to_test, valid_set="test")
-                    elif args.valid_set=="valid":
-                        ret = test(sess, model, users_to_test, valid_set="valid")
+                    ret, _ = eval_valid.evaluate(model)
                     # ret = test(sess, model, users_to_test)
                     t3 = time()
+                    print(ret)
+
+                    n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                    ret=n_ret
                     loss_loger.append(loss)
                     rec_loger.append(ret['recall'][0])
                     pre_loger.append(ret['precision'][0])
@@ -751,26 +1004,35 @@ if __name__ == '__main__':
                                     ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                     ret['ndcg'][0], ret['ndcg'][-1])
                         print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
                 elif args.test=="rubi":
                     print('Epoch %d'%(epoch))
+                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                        f.write('Epoch %d'%(epoch)+"\n")
                     best_c = 0
                     best_hr = 0
                     best_recall=0
                     best_ndcg=0
                     best_pre=0
+                    best_flag=0
                     for c in np.linspace(args.start, args.end, args.step):
                         model.update_c(sess, c)
-                        if args.valid_set=="test":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="test")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="test")
-                        elif args.valid_set=="valid":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="valid")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="valid")
+                        if args.train == 'rubibceboth':
+                            model.add_model_type("rubi_both")
+                            ret, _ = eval_valid.evaluate(model)
+
+                        #ret = test(sess, data, model, model_type="rubi_both", valid_set="test")
+                        else:
+                            model.add_model_type("rubi_c")
+                            ret, _ = eval_valid.evaluate(model)
                         t3 = time()
+                        print(ret)
+
+                        n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                        #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                        ret=n_ret
+                        
                         loss_loger.append(loss)
                         rec_loger.append(ret['recall'][0])
                         pre_loger.append(ret['precision'][0])
@@ -791,62 +1053,36 @@ if __name__ == '__main__':
                                         ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                         ret['ndcg'][0], ret['ndcg'][-1])
                             print(perf_str)
+                            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                                f.write(perf_str+"\n")
+
+                    if best_hr > config['best_c_hr']:
+                        best_flag=1
+                        config['best_c_hr'] = best_hr
+                        config['best_c_ndcg'] = best_ndcg
+                        config['best_c_precision'] = best_pre
+                        config['best_c_recall'] = best_recall
+                        config['best_c_epoch'] = epoch
+                        config['best_c'] = best_c
                     
-                    for c in np.linspace(best_c-1, best_c+1,1):
-                        model.update_c(sess, c)
-                        if args.valid_set=="test":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="test")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="test")
-                        elif args.valid_set=="valid":
-                            if args.train == 'rubibceboth':
-                                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="valid")
-                            else:
-                                ret = test(sess, model, users_to_test, model_type="rubi_c", valid_set="valid")
-                        t3 = time()
-                        loss_loger.append(loss)
-                        rec_loger.append(ret['recall'][0])
-                        pre_loger.append(ret['precision'][0])
-                        ndcg_loger.append(ret['ndcg'][0])
-                        hit_loger.append(ret['hit_ratio'][0])
-
-                        if args.verbose > 0:
-                            perf_str = 'c:%.2f [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
-                                    'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                                    (c, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
-                                        ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                        ret['ndcg'][0], ret['ndcg'][-1])
-                            print(perf_str)
-
-                        if ret['hit_ratio'][0] > best_hr:
-                            best_hr = ret['hit_ratio'][0]
-                            best_recall=ret['recall'][0]
-                            best_pre=ret['precision'][0]
-                            best_ndcg=ret['ndcg'][0]
-                            best_c = c
-
-                        if ret['hit_ratio'][0] > config['best_c_hr']:
-                            config['best_c_hr'] = ret['hit_ratio'][0]
-                            config['best_c_ndcg'] = ret['ndcg'][0]
-                            config['best_c_precision'] = ret['precision'][0]
-                            config['best_c_recall'] = ret['recall'][0]
-                            config['best_c_epoch'] = epoch
-                            config['best_c'] = c
-
                     ret['hit_ratio'][0]=best_hr
                     ret['recall'][0]=best_recall
                     ret['precision'][0]=best_pre
                     ret['ndcg'][0]=best_ndcg
+                    
+
 
                 # *********************************************************
                 # save the user & item embeddings for pretraining.
-                config, stopping_step, should_stop = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
+                if args.test=="rubi":
+                    model.update_c(sess,best_c)
+                config, stopping_step, should_stop,best_flag = early_stop(ret['hit_ratio'][0], ret['ndcg'][0], ret['recall'][0], ret['precision'][0], epoch, config, stopping_step)
                 if args.save_flag == 1:
                     if os.path.exists('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID)) == False:
                         os.makedirs('{}_{}_checkpoint/wd_{}_lr_{}_{}/'.format(args.model, args.dataset, args.wd, args.lr, args.saveID))
                     saver.save(sess, '{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch))
-
+                    if best_flag:
+                        config['best_name']='{}_{}_checkpoint/wd_{}_lr_{}_{}/{}_ckpt.ckpt'.format(args.model, args.dataset, args.wd, args.lr, args.saveID, epoch)
                 if should_stop and args.early_stop == 1:
                     print("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
                     logging.info("{} dataset best epoch{}: hr:{} ndcg:{} recall:{} precision:{}".format(args.dataset, config['best_epoch'],config['best_hr'],config['best_ndcg'], config['best_recall'], config['best_pre']))
@@ -859,14 +1095,38 @@ if __name__ == '__main__':
                             print(config['best_c'], file = f)
 
                     break
+            
+            # test ood/id
+            print('#loading best models at epoch {} with c= {}'.format(config['best_epoch'],config['best_c']))
+            saver.restore(sess, config['best_name'])
+            ret, _ = eval_test_ood.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_ood: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+
+            if "new" in args.dataset:
+                ret, _ = eval_test_id.evaluate(model)
+                n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+                ret=n_ret
+                perf_str = 'test_id: recall={}, ' \
+                                    'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                        str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+                print(perf_str)
+                with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                    f.write(perf_str+"\n")
+
         # pretrain
         else:
             print('#load existing models.')
 
             model_file = 'mf_addressa_checkpoint/wd_1e-05_lr_0.001_mfnormalbce/669_ckpt.ckpt'
             saver.restore(sess, model_file)
-            users_to_test = list(data.test_user_list.keys())
-            ret = test(sess, model, users_to_test, valid_set="test")
+            ret = test(sess, data, model, valid_set="test")
             perf_str = ' recall={}, ' \
                                     'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
                                         str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
@@ -877,10 +1137,9 @@ if __name__ == '__main__':
             model_file = 'mf_addressa_checkpoint/wd_1e-05_lr_0.001_mf3branch_beta0/199_ckpt.ckpt'
             saver.restore(sess, model_file)
             c_best = 33.3
-            users_to_test = list(data.test_user_list.keys())
             for c in [0, c_best]:
                 model.update_c(sess, c)
-                ret = test(sess, model, users_to_test, model_type="rubi_both", valid_set="test")
+                ret = test(sess, data, model, model_type="rubi_both", valid_set="test")
                 perf_str = 'c:{}: recall={}, ' \
                                         'precision={}, hit={}, ndcg={}'.format(c, str(ret["recall"]),
                                             str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))

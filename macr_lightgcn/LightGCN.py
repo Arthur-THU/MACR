@@ -18,6 +18,7 @@ from tensorflow.python.client import device_lib
 from tqdm import tqdm
 from utility.helper import *
 from utility.batch_test import *
+from evaluator import ProxyEvaluator
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
@@ -28,16 +29,19 @@ gpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'GPU
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
 
 class LightGCN(object):
-    def __init__(self, data_config, pretrain_data,user_pop_num=-1,item_pop_num=-1):
+    def __init__(self, data_config, pretrain_data,user_pop_num=-1,item_pop_num=-1,user_pop=None,item_pop=None,pop_branch="lightgcn",pop_reduct=0):
         # argument settings
         self.model_type = 'LightGCN'
         self.adj_type = args.adj_type
         self.alg_type = args.alg_type
         self.pretrain_data = pretrain_data
+        self.pop_branch=pop_branch
+        self.pop_reduct=pop_reduct
         self.n_users = data_config['n_users']
         self.n_items = data_config['n_items']
         self.n_fold = 100
         self.norm_adj = data_config['norm_adj']
+        self.norm_adj_pop = data_config['norm_adj_pop']
         self.n_nonzero_elems = self.norm_adj.count_nonzero()
         self.lr = args.lr
         self.emb_dim = args.embed_size
@@ -49,6 +53,10 @@ class LightGCN(object):
         self.log_dir=self.create_model_str()
         self.verbose = args.verbose
         self.Ks = eval(args.Ks)
+        self.user_pop_idx=tf.constant([user_pop[i] for i in range(self.n_users)])
+        self.item_pop_idx=tf.constant([item_pop[i] for i in range(self.n_items)])
+
+        
 
         self.tau = args.tau
         self.temp = args.tau_info
@@ -137,6 +145,8 @@ class LightGCN(object):
         """
         if self.alg_type in ['lightgcn']:
             self.ua_embeddings, self.ia_embeddings = self._create_lightgcn_embed()
+            self.ua_pop_embeddings,self.ia_pop_embeddings = self._create_lightgcn_embed(is_pop=True)
+
             
         elif self.alg_type in ['ngcf']:
             self.ua_embeddings, self.ia_embeddings = self._create_ngcf_embed()
@@ -159,9 +169,20 @@ class LightGCN(object):
         self.neg_i_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['item_embedding'], self.neg_items)
 
 
-        self.user_pop_embedding = tf.nn.embedding_lookup(self.weights['user_pop_embedding'], self.users_pop)
-        self.pos_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.pos_items_pop)
-        self.neg_item_pop_embedding = tf.nn.embedding_lookup(self.weights['item_pop_embedding'], self.neg_items_pop)
+        
+        if self.pop_branch=="mf":
+            self.user_pop_embedding = tf.nn.embedding_lookup(self.weights['tiled_user_pop_embedding'], self.users)
+            self.pos_item_pop_embedding = tf.nn.embedding_lookup(self.weights['tiled_item_pop_embedding'], self.pos_items)
+            self.neg_item_pop_embedding = tf.nn.embedding_lookup(self.weights['tiled_item_pop_embedding'], self.neg_items)
+        elif self.pop_branch=="lightgcn":
+            if self.pop_reduct==0:
+                self.user_pop_embedding = tf.nn.embedding_lookup(self.ua_pop_embeddings, self.users)
+                self.pos_item_pop_embedding = tf.nn.embedding_lookup(self.ia_pop_embeddings, self.pos_items)
+                self.neg_item_pop_embedding = tf.nn.embedding_lookup(self.ia_pop_embeddings, self.neg_items)
+            else:
+                self.user_pop_embedding = tf.nn.embedding_lookup(self.ua_pop_embeddings, self.users_pop)
+                self.pos_item_pop_embedding = tf.nn.embedding_lookup(self.ia_pop_embeddings, self.pos_items_pop)
+                self.neg_item_pop_embedding = tf.nn.embedding_lookup(self.ia_pop_embeddings, self.neg_items_pop)
 
         """
         *********************************************************
@@ -178,13 +199,14 @@ class LightGCN(object):
         """
         self.constant_e = self.weights['constant_embedding']
         self.batch_ratings = tf.matmul(self.u_g_embeddings, self.pos_i_g_embeddings, transpose_a=False, transpose_b=True)
+        self.batch_ratings_pop = tf.matmul(self.user_pop_embedding, self.pos_item_pop_embedding, transpose_a=False, transpose_b=True)
         self.batch_ratings_constant = tf.matmul(self.constant_e, self.pos_i_g_embeddings, transpose_a=False, transpose_b=True)
         self.batch_ratings_causal_c = self.batch_ratings - self.batch_ratings_constant
         """
         *********************************************************
         Generate Predictions & Optimize via BPR loss.
         """
-        self.mf_loss_info_1, self.mf_loss_info_2, self.reg_loss_info = self.create_dyninfonce_loss(self.u_g_embeddings,
+        self.mf_loss_info_1, self.mf_loss_info_2, self.reg_loss_info, self.reg_loss_freeze, self.reg_loss_norm, self.loss_mf_ori, self.debug = self.create_dyninfonce_loss(self.u_g_embeddings,
                                                                           self.pos_i_g_embeddings,
                                                                           self.neg_i_g_embeddings,
                                                                           self.user_pop_embedding,
@@ -193,7 +215,20 @@ class LightGCN(object):
 
 
         self.loss_info = self.mf_loss_info_1 + self.mf_loss_info_2 + self.reg_loss_info
+        self.loss_mf_info = self.reg_loss_norm + self.loss_mf_ori
         self.opt_info = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_info)
+        
+        trainable_v1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+        #print(trainable_v1)
+        pop_list=[self.weights["user_pop_embedding"], self.weights["item_pop_embedding"]]
+        norm_list=[i for i in trainable_v1 if i not in pop_list]
+
+        self.loss_freeze=self.reg_loss_freeze + self.mf_loss_info_2
+        self.opt_freeze = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_freeze,var_list=pop_list)
+        self.opt_none_freeze = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_info,var_list=norm_list)
+
+        self.opt_mf_info = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_mf_info)
+
 
         self.mf_loss, self.emb_loss, self.reg_loss = self.create_bpr_loss(self.u_g_embeddings,
                                                                           self.pos_i_g_embeddings,
@@ -260,6 +295,8 @@ class LightGCN(object):
         if self.pop_partition_user!=-1:
             all_weights["user_pop_embedding"] = tf.Variable(initializer([self.pop_partition_user, self.emb_dim]), name = 'user_pop_embedding')
             all_weights["item_pop_embedding"] = tf.Variable(initializer([self.pop_partition_item, self.emb_dim]), name = 'item_pop_embedding')
+            all_weights["tiled_user_pop_embedding"] = tf.nn.embedding_lookup(all_weights["user_pop_embedding"],self.user_pop_idx)
+            all_weights["tiled_item_pop_embedding"] = tf.nn.embedding_lookup(all_weights["item_pop_embedding"],self.item_pop_idx)
 
         self.w = tf.Variable(initializer([self.emb_dim, 1]), name = 'item_branch')
         self.w_user = tf.Variable(initializer([self.emb_dim, 1]), name = 'user_branch')
@@ -283,44 +320,87 @@ class LightGCN(object):
                 initializer([1, self.weight_size_list[k+1]]), name='b_mlp_%d' % k)
 
         return all_weights
-    def _split_A_hat(self, X):
+    def _split_A_hat(self, X, is_pop=False):
         A_fold_hat = []
+        if is_pop==False:
+            fold_len = (self.n_users + self.n_items) // self.n_fold
+            for i_fold in range(self.n_fold):
+                start = i_fold * fold_len
+                if i_fold == self.n_fold -1:
+                    end = self.n_users + self.n_items
+                else:
+                    end = (i_fold + 1) * fold_len
 
-        fold_len = (self.n_users + self.n_items) // self.n_fold
-        for i_fold in range(self.n_fold):
-            start = i_fold * fold_len
-            if i_fold == self.n_fold -1:
-                end = self.n_users + self.n_items
-            else:
-                end = (i_fold + 1) * fold_len
-
-            A_fold_hat.append(self._convert_sp_mat_to_sp_tensor(X[start:end]))
-        return A_fold_hat
-
-    def _split_A_hat_node_dropout(self, X):
-        A_fold_hat = []
-
-        fold_len = (self.n_users + self.n_items) // self.n_fold
-        for i_fold in range(self.n_fold):
-            start = i_fold * fold_len
-            if i_fold == self.n_fold -1:
-                end = self.n_users + self.n_items
-            else:
-                end = (i_fold + 1) * fold_len
-
-            temp = self._convert_sp_mat_to_sp_tensor(X[start:end])
-            n_nonzero_temp = X[start:end].count_nonzero()
-            A_fold_hat.append(self._dropout_sparse(temp, 1 - self.node_dropout[0], n_nonzero_temp))
-
-        return A_fold_hat
-
-    def _create_lightgcn_embed(self):
-        if self.node_dropout_flag:
-            A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+                A_fold_hat.append(self._convert_sp_mat_to_sp_tensor(X[start:end]))
         else:
-            A_fold_hat = self._split_A_hat(self.norm_adj)
+            fold_len = (self.pop_partition_user + self.pop_partition_item) // self.n_fold
+            for i_fold in range(self.n_fold):
+                start = i_fold * fold_len
+                if i_fold == self.n_fold -1:
+                    end = self.pop_partition_user + self.pop_partition_item
+                else:
+                    end = (i_fold + 1) * fold_len
+
+                A_fold_hat.append(self._convert_sp_mat_to_sp_tensor(X[start:end]))
+            
+        return A_fold_hat
+
+    def _split_A_hat_node_dropout(self, X, is_pop=False):
+        A_fold_hat = []
+
+        if is_pop==False:
+            fold_len = (self.n_users + self.n_items) // self.n_fold
+            for i_fold in range(self.n_fold):
+                start = i_fold * fold_len
+                if i_fold == self.n_fold -1:
+                    end = self.n_users + self.n_items
+                else:
+                    end = (i_fold + 1) * fold_len
+
+                temp = self._convert_sp_mat_to_sp_tensor(X[start:end])
+                n_nonzero_temp = X[start:end].count_nonzero()
+                A_fold_hat.append(self._dropout_sparse(temp, 1 - self.node_dropout[0], n_nonzero_temp))
+        else:
+            fold_len = (self.pop_partition_user + self.pop_partition_item) // self.n_fold
+            for i_fold in range(self.n_fold):
+                start = i_fold * fold_len
+                if i_fold == self.n_fold -1:
+                    end = self.pop_partition_user + self.pop_partition_item
+                else:
+                    end = (i_fold + 1) * fold_len
+
+                temp = self._convert_sp_mat_to_sp_tensor(X[start:end])
+                n_nonzero_temp = X[start:end].count_nonzero()
+                A_fold_hat.append(self._dropout_sparse(temp, 1 - self.node_dropout[0], n_nonzero_temp))
+
+        return A_fold_hat
+
+    def _create_lightgcn_embed(self,is_pop=False):
+        #print(self.norm_adj.shape)
         
-        ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        
+        
+        if is_pop==False:
+            if self.node_dropout_flag:
+                A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+            else:
+                A_fold_hat = self._split_A_hat(self.norm_adj)
+            ego_embeddings = tf.concat([self.weights['user_embedding'], self.weights['item_embedding']], axis=0)
+        else:
+            if self.pop_reduct:
+                if self.node_dropout_flag:
+                    A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj_pop,is_pop=True)
+                else:
+                    A_fold_hat = self._split_A_hat(self.norm_adj_pop,is_pop=True)
+                ego_embeddings = tf.concat([self.weights['user_pop_embedding'], self.weights['item_pop_embedding']], axis=0)
+            else:
+                if self.node_dropout_flag:
+                    A_fold_hat = self._split_A_hat_node_dropout(self.norm_adj)
+                else:
+                    A_fold_hat = self._split_A_hat(self.norm_adj)
+                ego_embeddings = tf.concat([self.weights['tiled_user_pop_embedding'], self.weights['tiled_item_pop_embedding']], axis=0)
+
+
         all_embeddings = [ego_embeddings]
         
         for k in range(0, self.n_layers):
@@ -334,7 +414,10 @@ class LightGCN(object):
             all_embeddings += [ego_embeddings]
         all_embeddings=tf.stack(all_embeddings,1)
         all_embeddings=tf.reduce_mean(all_embeddings,axis=1,keepdims=False)
-        u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        if is_pop==False or self.pop_reduct==0:
+            u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
+        else:
+            u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.pop_partition_user, self.pop_partition_item], 0)
         return u_g_embeddings, i_g_embeddings
     
     def _create_ngcf_embed(self):
@@ -458,41 +541,53 @@ class LightGCN(object):
         return mf_loss, emb_loss, reg_loss
 
     def create_dyninfonce_loss(self, users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop):
+
         tiled_usr=tf.reshape(tf.tile(users,[1,self.neg_sample]),[-1,self.emb_dim])
         tiled_usr_pop=tf.reshape(tf.tile(users_pop,[1,self.neg_sample]),[-1,self.emb_dim])
 
-        # user_n2=tf.norm(users,ord=2,axis=1)
-        # user_pop_n2=tf.norm(users_pop,ord=2,axis=1)
-        # tiled_usr_n2=tf.norm(tiled_usr,ord=2,axis=1)
-        # tiled_usr_pop_n2=tf.norm(tiled_usr_pop,ord=2,axis=1)#tf.sqrt(tf.reduce_sum(tf.multiply(tiled_usr_pop,tiled_usr_pop),axis=1))
-        # pos_item_n2=tf.norm(pos_items,ord=2,axis=1)
-        # neg_item_n2=tf.norm(neg_items,ord=2,axis=1)
-        # neg_item_pop_n2=tf.norm(neg_items_pop,ord=2,axis=1)
-        # pos_item_pop_n2=tf.norm(pos_items_pop,ord=2,axis=1)
-        
-       
+
+        user_n2=tf.norm(users,ord=2,axis=1)
+        user_pop_n2=tf.norm(users_pop,ord=2,axis=1)
+        tiled_usr_n2=tf.norm(tiled_usr,ord=2,axis=1)
+        tiled_usr_pop_n2=tf.norm(tiled_usr_pop,ord=2,axis=1)#tf.sqrt(tf.reduce_sum(tf.multiply(tiled_usr_pop,tiled_usr_pop),axis=1))
+        pos_item_n2=tf.norm(pos_items,ord=2,axis=1)
+        neg_item_n2=tf.norm(neg_items,ord=2,axis=1)
+        neg_item_pop_n2=tf.norm(neg_items_pop,ord=2,axis=1)
+        pos_item_pop_n2=tf.norm(pos_items_pop,ord=2,axis=1)
+
         pos_item_pop_prod=tf.reduce_sum(tf.multiply(users_pop,pos_items_pop),axis=1)
         neg_item_pop_prod=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
-        pos_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(users,pos_items),axis=1))/self.temp
-        neg_item_score=tf.sigmoid(tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1))/self.temp
-        pos_item_pop_score=tf.sigmoid(pos_item_pop_prod)/self.temp
-        neg_item_pop_score=tf.sigmoid(neg_item_pop_prod)/self.temp
+        pos_item_prod=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)
+        neg_item_prod=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)
+        pos_item_score=tf.sigmoid(pos_item_prod)
+        neg_item_score=tf.sigmoid(neg_item_prod)
+        # pos_item_pop_score=tf.sigmoid(pos_item_pop_prod)/self.temp
+        # neg_item_pop_score=tf.sigmoid(neg_item_pop_prod)/self.temp
 
 
-        #pos_item_score=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)/user_n2/pos_item_n2/self.temp
-        #neg_item_score=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)/tiled_usr_n2/neg_item_n2/self.temp
-        #pos_item_pop_score=pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/self.temp
-        #neg_item_pop_score=neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/self.temp
+        #pos_item_score=pos_item_prod/user_n2/pos_item_n2
+        #neg_item_score=neg_item_prod/tiled_usr_n2/neg_item_n2
+        pos_item_pop_score=pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/self.temp
+        neg_item_pop_score=neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/self.temp
+
+        pos_item_score_mf_exp=tf.exp(pos_item_score/self.tau)
+        neg_item_score_mf_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_score/self.tau,[-1,self.neg_sample])),axis=1)
+        loss_mf=tf.reduce_mean(tf.negative(tf.log(pos_item_score_mf_exp/(pos_item_score_mf_exp+neg_item_score_mf_exp))))
+
 
         neg_item_pop_score_exp=tf.reduce_sum(tf.exp(tf.reshape(neg_item_pop_score,[-1,self.neg_sample])),axis=1)
         pos_item_pop_score_exp=tf.exp(pos_item_pop_score)
-        loss2=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
+        loss2=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_pop_score_exp/(pos_item_pop_score_exp+neg_item_pop_score_exp))))
+
+        debug=tf.sigmoid(pos_item_pop_prod)
 
         weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_prod))/self.tau
         weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_prod))/self.tau
+        #weighted_pos_item_score=tf.multiply(pos_item_score,pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/2+0.5)/self.tau
+        #weighted_neg_item_score=tf.multiply(neg_item_score,neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/2+0.5)/self.tau
         neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
         pos_item_score_exp=tf.exp(weighted_pos_item_score)
-        loss1=self.w_lambda*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
+        loss1=(1-self.w_lambda)*tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
 
         regularizer1 = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
         regularizer1 = regularizer1/self.batch_size
@@ -501,7 +596,10 @@ class LightGCN(object):
         regularizer2  = regularizer2/self.batch_size
         reg_loss = self.decay * (regularizer1+regularizer2)
 
-        return loss1, loss2, reg_loss
+        reg_loss_freeze=self.decay * (regularizer2)
+        reg_loss_norm=self.decay * (regularizer1)
+
+        return loss1, loss2, reg_loss, reg_loss_freeze, reg_loss_norm, loss_mf, debug
 
     def create_bce_loss_two_brach1(self, users, pos_items, neg_items):
         pos_scores = tf.reduce_sum(tf.multiply(users, pos_items), axis=1)   #users, pos_items, neg_items have the same shape
@@ -628,6 +726,43 @@ class LightGCN(object):
     def update_c(self, sess, c):
         sess.run(tf.assign(self.rubi_c, c*tf.ones([1])))
 
+
+    def add_sess(self, sess, args):
+        self.sess=sess
+        self.method=args.test
+    
+    def set_method(self, method):
+        self.method=method
+    
+    def predict(self, users, items=None):
+        if items==None:
+            items = list(range(self.n_items))
+        if self.method=="normal":
+            rate_batch = self.sess.run(self.batch_ratings, {self.users: users,
+                                                        self.pos_items: items,
+                                                        self.node_dropout: [0.] * len(self.weight_size),
+                                                        self.mess_dropout: [0.] * len(self.weight_size)})
+        elif self.method == 'causal':
+            rate_batch = self.sess.run(self.batch_ratings_causal_c, {self.users: users,
+                                                        self.pos_items: items,
+                                                        self.node_dropout: [0.] * len(self.weight_size),
+                                                        self.mess_dropout: [0.] * len(self.weight_size)})
+        elif self.method == 'rubiboth':
+            rate_batch = self.sess.run(self.rubi_ratings_both, {self.users: users,
+                                                        self.pos_items: items,
+                                                        self.node_dropout: [0.] * len(self.weight_size),
+                                                        self.mess_dropout: [0.] * len(self.weight_size)})
+        elif self.method == 'pop':
+            rate_batch = self.sess.run(self.batch_ratings_pop, {self.users: users,
+                                                        self.pos_items: items,
+                                                        self.node_dropout: [0.] * len(self.weight_size),
+                                                        self.mess_dropout: [0.] * len(self.weight_size)})
+
+            
+
+        return rate_batch
+
+
 def load_pretrained_data():
     pretrain_path = '%spretrain/%s/%s.npz' % (args.proj_path, args.dataset, 'embedding')
     try:
@@ -664,11 +799,13 @@ class sample_thread_test(threading.Thread):
             
 # training on GPU
 class train_thread(threading.Thread):
-    def __init__(self,model, sess, sample, args):
+    def __init__(self,model, sess, sample, args, epoch):
         threading.Thread.__init__(self)
+        self.epoch=epoch
         self.model = model
         self.sess = sess
         self.sample = sample
+        self.args=args
     def run(self):
         sess_list = []
         if args.loss == 'bpr':
@@ -682,9 +819,17 @@ class train_thread(threading.Thread):
         elif args.loss == 'bceboth':
             sess_list = [self.model.opt_two_bce_both, self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both, self.model.reg_loss_two_bce_both]
         elif args.loss == 'dyninfo':
-            sess_list = [self.model.opt_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
+            if self.args.freeze==1:
+                if self.epoch <= self.args.freeze_epoch:
+                    sess_list = [self.model.opt_freeze, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]#,self.model.debug]
+                else:
+                    sess_list = [self.model.opt_none_freeze, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]#,self.model.debug]
+            else:
+                sess_list = [self.model.opt_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
+        elif args.loss == 'mf_info':
+            sess_list = [self.model.opt_mf_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
 
-        if args.loss!="dyninfo":
+        if args.loss!="dyninfo" and args.loss!="mf_info":
             if len(gpus):
                 with tf.device(gpus[-1]):
                     users, pos_items, neg_items = self.sample.data
@@ -784,6 +929,12 @@ class train_thread_test(threading.Thread):
                                                     model.pos_items_pop: pos_items_pop,
                                                     model.neg_items_pop: neg_items_pop})
 
+def merge_user_list(user_lists):
+    out=collections.defaultdict(list)
+    for user_list in user_lists:
+        for key, item in user_list.items():
+            out[key]=out[key]+item
+    return out
 
 if __name__ == '__main__':
     # os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
@@ -793,22 +944,40 @@ if __name__ == '__main__':
     config['n_users'] = data_generator.n_users
     config['n_items'] = data_generator.n_items
 
+    Ks=eval(args.Ks)
+
+    data=data_generator
+
+    if "new" in args.dataset:
+        eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_id_user_list]))
+        eval_test_id = ProxyEvaluator(data,data.train_user_list,data.test_id_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_user_list]))
+        eval_valid = ProxyEvaluator(data,data.train_user_list,data.valid_user_list,top_k=Ks)
+    else:
+        eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks)
+        eval_test_id = None
+        eval_valid = eval_test_ood
+
     """
     *********************************************************
     Generate the Laplacian matrix, where each entry defines the decay factor (e.g., p_ui) between two connected nodes.
     """
     plain_adj, norm_adj, mean_adj, pre_adj = data_generator.get_adj_mat()
+    plain_adj_pop, norm_adj_pop, mean_adj_pop, pre_adj_pop= data_generator.get_adj_mat(is_pop=True)
     if args.adj_type == 'plain':
         config['norm_adj'] = plain_adj
+        config['norm_adj_pop']=plain_adj_pop
         print('use the plain adjacency matrix')
     elif args.adj_type == 'norm':
         config['norm_adj'] = norm_adj
+        config['norm_adj_pop']=norm_adj_pop
         print('use the normalized adjacency matrix')
     elif args.adj_type == 'gcmc':
         config['norm_adj'] = mean_adj
+        config['norm_adj_pop']=mean_adj_pop
         print('use the gcmc adjacency matrix')
     elif args.adj_type =='pre':
         config['norm_adj']=pre_adj
+        config['norm_adj_pop']=pre_adj_pop
         print('use the pre adjcency matrix')
     else:
         config['norm_adj'] = mean_adj + sp.eye(mean_adj.shape[0])
@@ -818,7 +987,8 @@ if __name__ == '__main__':
         pretrain_data = load_pretrained_data()
     else:
         pretrain_data = None
-    model = LightGCN(data_config=config, pretrain_data=pretrain_data,user_pop_num=data_generator.user_pop_num, item_pop_num=data_generator.item_pop_num)
+    model = LightGCN(data_config=config, pretrain_data=pretrain_data,user_pop_num=data_generator.user_pop_num, item_pop_num=data_generator.item_pop_num,user_pop=data_generator.user_pop_idx, item_pop=data_generator.item_pop_idx, pop_branch=args.pop_branch, pop_reduct=args.pop_reduct)
+    model.add_sess(sess,args)
     
     """
     *********************************************************
@@ -896,10 +1066,12 @@ if __name__ == '__main__':
     best_hr_norm = 0
     best_str = ''
 
-    is_pop = (args.loss=="dyninfo")
+    is_pop = (args.loss=="dyninfo" or args.loss=="mf_info")
+    # if args.loss=="dyninfo":
+    #     model.set_method("pop")
     # data_generator.check()
     if args.only_test == 0 and args.pretrain == 0:
-        for epoch in range(1, args.epoch + 1):
+        for epoch in range(1, args.epoch +1):
             t1 = time()
             loss, mf_loss, emb_loss, reg_loss = 0., 0., 0., 0.
             n_batch = data_generator.n_train // args.batch_size + 1
@@ -912,7 +1084,7 @@ if __name__ == '__main__':
             sample_last.start()
             sample_last.join()
             for idx in tqdm(range(n_batch)):
-                train_cur = train_thread(model, sess, sample_last, args)
+                train_cur = train_thread(model, sess, sample_last, args, epoch)
                 sample_next = sample_thread(pop=is_pop)
                 
                 train_cur.start()
@@ -921,16 +1093,19 @@ if __name__ == '__main__':
                 sample_next.join()
                 train_cur.join()
                 #users, pos_items, neg_items, users_pop = sample_last.data
-                _, batch_loss, batch_mf_loss, batch_emb_loss, batch_reg_loss = train_cur.data
+                _, batch_loss, batch_mf_loss, batch_emb_loss, batch_reg_loss= train_cur.data
                 sample_last = sample_next
             
                 loss += batch_loss/n_batch
                 mf_loss += batch_mf_loss/n_batch
                 emb_loss += batch_emb_loss/n_batch
                 reg_loss += batch_reg_loss/n_batch
-                
+            
 
-                
+            # print(debug)
+            # print(np.mean(debug))
+            # print(np.var(debug))
+            #input()              
             if np.isnan(loss) == True:
                 if args.verbose > 0 and epoch % args.verbose == 0:
                     perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
@@ -938,7 +1113,7 @@ if __name__ == '__main__':
                     print(perf_str)
                 print('ERROR: loss is nan.')
                 sys.exit()
-            if (epoch % args.log_interval) != 0:
+            if (epoch % args.log_interval) != 0 or epoch <=args.freeze_epoch :
                 if args.verbose > 0 and epoch % args.verbose == 0:
                     perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
                         epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
@@ -946,6 +1121,8 @@ if __name__ == '__main__':
                         f.write(perf_str+"\n")
                     print(perf_str)
                 continue
+            # if epoch > args.freeze_epoch:
+            #     model.set_method(args.test)
             # users_to_test = list(data_generator.train_items.keys())
             # ret = test(sess, model, users_to_test ,drop_flag=True,train_set_flag=1)
             # perf_str = 'Epoch %d: train==[%.5f=%.5f + %.5f + %.5f], recall=[%s], hr=[%s], ndcg=[%s]' % \
@@ -959,158 +1136,279 @@ if __name__ == '__main__':
             #                                                                 model.train_ndcg_first: ret['ndcg'][0],
             #                                                                 model.train_ndcg_last: ret['ndcg'][-1]})
             # train_writer.add_summary(summary_train_acc, epoch // 20)
-            
-            '''
-            *********************************************************
-            parallelized test sampling
-            '''
-            # test loss
-            sample_last= sample_thread_test(pop=is_pop)
-            sample_last.start()
-            sample_last.join()
-            loss_test,mf_loss_test,emb_loss_test,reg_loss_test=0.,0.,0.,0.
-            for idx in range(n_batch):
-                train_cur = train_thread_test(model, sess, sample_last, args)
-                sample_next = sample_thread_test(pop=is_pop)
-                
-                train_cur.start()
-                sample_next.start()
-                
-                sample_next.join()
-                train_cur.join()
-                
-                #users, pos_items, neg_items = sample_last.data
-                batch_loss_test, batch_mf_loss_test, batch_emb_loss_test, batch_reg_loss_test = train_cur.data
-                sample_last = sample_next
-                
-                loss_test += batch_loss_test / n_batch
-                mf_loss_test += batch_mf_loss_test / n_batch
-                emb_loss_test += batch_emb_loss_test / n_batch
-                reg_loss_test += batch_reg_loss_test / n_batch
-                
-            # summary_test_loss = sess.run(model.merged_test_loss,
-            #                             feed_dict={model.test_loss: loss_test, model.test_mf_loss: mf_loss_test,
-            #                                         model.test_emb_loss: emb_loss_test, model.test_reg_loss: reg_loss_test})
-            # train_writer.add_summary(summary_test_loss, epoch // 20)
+
+
             t2 = time()
-            users_to_test = list(data_generator.test_set.keys())
-
-
-            perf_str = ''
-            if args.test == 'normal':
-                ret = test(sess, model, users_to_test, drop_flag=True)                                                                                 
-                t3 = time()
-                
-                loss_loger.append(loss)
-                rec_loger.append(ret['recall'])
-                pre_loger.append(ret['hr'])
-                ndcg_loger.append(ret['ndcg'])
-
-                if args.verbose > 0:
-                    perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
-                            'hr=[%s], ndcg=[%s]\n' % \
-                            (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
-                                ', '.join(['%.5f' % r for r in ret['recall']]),
-                                ', '.join(['%.5f' % r for r in ret['hr']]),
-                                ', '.join(['%.5f' % r for r in ret['ndcg']]))
-                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
-                        f.write(perf_str+"\n")
-                    print(perf_str, end='')
-                if ret['hr'][0] > best_hr_norm:
-                    best_hr_norm = ret['hr'][0]
-                    best_epoch = epoch
-                    best_str = perf_str
-            elif args.test=="rubi1" or args.test=='rubi2' or args.test=='rubiboth':
-                print('Epoch %d'%(epoch))
-                best_c = 0
-                best_hr = 0
+            #users_to_test = list(data.test_user_list.keys())
+            if args.test=="rubiboth":
+                best_hr=0
+                best_c=0
                 for c in np.linspace(args.start, args.end, args.step):
                     model.update_c(sess, c)
-                    ret = test(sess, model, users_to_test, method=args.test)
+                    ret, _ = eval_valid.evaluate(model)
                     t3 = time()
-                    loss_loger.append(loss)
+
+                    n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                    #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                    ret=n_ret
                     rec_loger.append(ret['recall'][0])
                     ndcg_loger.append(ret['ndcg'][0])
-                    hit_loger.append(ret['hr'][0])
+                    hit_loger.append(ret['hit_ratio'][0])
 
-                    if ret['hr'][0] > best_hr:
-                        best_hr = ret['hr'][0]
+                    if ret['hit_ratio'][0] > best_hr:
+                        best_hr = ret['hit_ratio'][0]
                         best_c = c
 
                     if args.verbose > 0:
-                        perf_str += 'c:%.2f recall=[%.5f, %.5f], ' \
+                        perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
                                     'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
                                     (c, ret['recall'][0], ret['recall'][-1],
-                                        ret['hr'][0], ret['hr'][-1],
+                                        ret['hit_ratio'][0], ret['hit_ratio'][-1],
                                         ret['ndcg'][0], ret['ndcg'][-1])
-                
-                flg = False
-                for c in np.linspace(best_c-1, best_c+1,6):
-                    model.update_c(sess, c)
-                    ret = test(sess, model, users_to_test, method=args.test)
-                    t3 = time()
-                    loss_loger.append(loss)
+                        print(perf_str)
+                        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                            f.write(perf_str+"\n")
+                model.update_c(sess, best_c)
+
+            if "new" in args.dataset: 
+                names=["valid","test_ood","test_id"]
+                test_trials=[eval_valid,eval_test_ood,eval_test_id]
+            else:
+                names=["valid"]
+                test_trials=[eval_valid]
+
+            for w,_eval in enumerate(test_trials):
+                ret, _ = _eval.evaluate(model)
+                t3 = time()
+
+                n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                ret=n_ret
+                if w==0:
                     rec_loger.append(ret['recall'][0])
+                    pre_loger.append(ret['precision'][0])
                     ndcg_loger.append(ret['ndcg'][0])
-                    hit_loger.append(ret['hr'][0])
+                    hit_loger.append(ret['hit_ratio'][0])
 
-                    if ret['hr'][0] > best_hr:
-                        best_hr = ret['hr'][0]
-                        best_c = c
-
-                    if args.verbose > 0:
-                        perf_str += 'c:%.2f recall=[%.5f, %.5f], ' \
-                                    'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
-                                    (c, ret['recall'][0], ret['recall'][-1],
-                                    ret['hr'][0], ret['hr'][-1],
-                                    ret['ndcg'][0], ret['ndcg'][-1])
-
-                    if ret['hr'][0] > config['best_c_hr']:
-                        config['best_c_hr'] = ret['hr'][0]
-                        config['best_c_ndcg'] = ret['ndcg'][0]
-                        config['best_c_recall'] = ret['recall'][0]
-                        config['best_c_epoch'] = epoch
-                        config['best_c'] = c
-                        flg = True
                     
-                ret['hr'][0] = best_hr
-                print(perf_str, end='')
-                if flg:
-                    best_str = perf_str
+                    best_hr = ret['hit_ratio'][0]
+                    best_recall=ret['recall'][0]
+                    best_pre=ret['precision'][0]
+                    best_ndcg=ret['ndcg'][0]
+
+                if args.verbose > 0:
+                    perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.5f=%.5f + %.5f + %.5f], split=[%s], recall=[%.5f, %.5f], ' \
+                        'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+                        (epoch, t2 - t1, t3 - t2, loss, mf_loss, emb_loss, reg_loss, names[w], ret['recall'][0], ret['recall'][-1],
+                            ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                            ret['ndcg'][0], ret['ndcg'][-1])
+                    print(perf_str)
+                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                        f.write(perf_str+"\n")
+                
+                
+            # ret, _ = eval_valid.evaluate(model)
+            # # ret = test(sess, model, users_to_test)
+            # t3 = time()
+            # print(ret)
+
+            # n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+            # ret=n_ret
+            # loss_loger.append(loss)
+            # rec_loger.append(ret['recall'][0])
+            # pre_loger.append(ret['precision'][0])
+            # ndcg_loger.append(ret['ndcg'][0])
+            # hit_loger.append(ret['hit_ratio'][0])
+            # if args.verbose > 0:
+            #     perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.8f=%.8f + %.8f], recall=[%.5f, %.5f], ' \
+            #             'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+            #             (epoch, t2 - t1, t3 - t2, loss, mf_loss, reg_loss, ret['recall'][0], ret['recall'][-1],
+            #                 ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+            #                 ret['ndcg'][0], ret['ndcg'][-1])
+            #     print(perf_str)
+            #     with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+            #         f.write(perf_str+"\n")
+            
+            # '''
+            # *********************************************************
+            # parallelized test sampling
+            # '''
+            # # test loss
+            # sample_last= sample_thread_test(pop=is_pop)
+            # sample_last.start()
+            # sample_last.join()
+            # loss_test,mf_loss_test,emb_loss_test,reg_loss_test=0.,0.,0.,0.
+            # for idx in range(n_batch):
+            #     train_cur = train_thread_test(model, sess, sample_last, args)
+            #     sample_next = sample_thread_test(pop=is_pop)
+                
+            #     train_cur.start()
+            #     sample_next.start()
+                
+            #     sample_next.join()
+            #     train_cur.join()
+                
+            #     #users, pos_items, neg_items = sample_last.data
+            #     batch_loss_test, batch_mf_loss_test, batch_emb_loss_test, batch_reg_loss_test = train_cur.data
+            #     sample_last = sample_next
+                
+            #     loss_test += batch_loss_test / n_batch
+            #     mf_loss_test += batch_mf_loss_test / n_batch
+            #     emb_loss_test += batch_emb_loss_test / n_batch
+            #     reg_loss_test += batch_reg_loss_test / n_batch
+                
+            # # summary_test_loss = sess.run(model.merged_test_loss,
+            # #                             feed_dict={model.test_loss: loss_test, model.test_mf_loss: mf_loss_test,
+            # #                                         model.test_emb_loss: emb_loss_test, model.test_reg_loss: reg_loss_test})
+            # # train_writer.add_summary(summary_test_loss, epoch // 20)
+            # t2 = time()
+            # users_to_test = list(data_generator.test_set.keys())
+
+
+            # perf_str = ''
+            # if args.test == 'normal':
+            #     ret = test(sess, model, users_to_test, drop_flag=True)                                                                                 
+            #     t3 = time()
+                
+            #     loss_loger.append(loss)
+            #     rec_loger.append(ret['recall'])
+            #     pre_loger.append(ret['hr'])
+            #     ndcg_loger.append(ret['ndcg'])
+
+            #     if args.verbose > 0:
+            #         perf_str = 'Epoch %d [%.1fs + %.1fs]: test==[%.5f=%.5f + %.5f + %.5f], recall=[%s], ' \
+            #                 'hr=[%s], ndcg=[%s]\n' % \
+            #                 (epoch, t2 - t1, t3 - t2, loss_test, mf_loss_test, emb_loss_test, reg_loss_test, 
+            #                     ', '.join(['%.5f' % r for r in ret['recall']]),
+            #                     ', '.join(['%.5f' % r for r in ret['hr']]),
+            #                     ', '.join(['%.5f' % r for r in ret['ndcg']]))
+            #         with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+            #             f.write(perf_str+"\n")
+            #         print(perf_str, end='')
+            #     if ret['hr'][0] > best_hr_norm:
+            #         best_hr_norm = ret['hr'][0]
+            #         best_epoch = epoch
+            #         best_str = perf_str
+            # elif args.test=="rubi1" or args.test=='rubi2' or args.test=='rubiboth':
+            #     print('Epoch %d'%(epoch))
+            #     best_c = 0
+            #     best_hr = 0
+            #     for c in np.linspace(args.start, args.end, args.step):
+            #         model.update_c(sess, c)
+            #         ret = test(sess, model, users_to_test, method=args.test)
+            #         t3 = time()
+            #         loss_loger.append(loss)
+            #         rec_loger.append(ret['recall'][0])
+            #         ndcg_loger.append(ret['ndcg'][0])
+            #         hit_loger.append(ret['hr'][0])
+
+            #         if ret['hr'][0] > best_hr:
+            #             best_hr = ret['hr'][0]
+            #             best_c = c
+
+            #         if args.verbose > 0:
+            #             perf_str += 'c:%.2f recall=[%.5f, %.5f], ' \
+            #                         'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+            #                         (c, ret['recall'][0], ret['recall'][-1],
+            #                             ret['hr'][0], ret['hr'][-1],
+            #                             ret['ndcg'][0], ret['ndcg'][-1])
+                
+            #     flg = False
+            #     for c in np.linspace(best_c-1, best_c+1,6):
+            #         model.update_c(sess, c)
+            #         ret = test(sess, model, users_to_test, method=args.test)
+            #         t3 = time()
+            #         loss_loger.append(loss)
+            #         rec_loger.append(ret['recall'][0])
+            #         ndcg_loger.append(ret['ndcg'][0])
+            #         hit_loger.append(ret['hr'][0])
+
+            #         if ret['hr'][0] > best_hr:
+            #             best_hr = ret['hr'][0]
+            #             best_c = c
+
+            #         if args.verbose > 0:
+            #             perf_str += 'c:%.2f recall=[%.5f, %.5f], ' \
+            #                         'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+            #                         (c, ret['recall'][0], ret['recall'][-1],
+            #                         ret['hr'][0], ret['hr'][-1],
+            #                         ret['ndcg'][0], ret['ndcg'][-1])
+
+            #         if ret['hr'][0] > config['best_c_hr']:
+            #             config['best_c_hr'] = ret['hr'][0]
+            #             config['best_c_ndcg'] = ret['ndcg'][0]
+            #             config['best_c_recall'] = ret['recall'][0]
+            #             config['best_c_epoch'] = epoch
+            #             config['best_c'] = c
+            #             flg = True
+                    
+            #     ret['hr'][0] = best_hr
+            #     print(perf_str, end='')
+            #     if flg:
+            #         best_str = perf_str
 
 
 
             
                 
-            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['hr'][0], cur_best_pre_0,
+            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['hit_ratio'][0], cur_best_pre_0,
                                                                         stopping_step, expected_order='acc', flag_step=10)
 
             # *********************************************************
             # save the user & item embeddings for pretraining.
-            if ret['hr'][0] == cur_best_pre_0:
+            if ret['hit_ratio'][0] == cur_best_pre_0:
                 best_epoch = epoch
+                if args.test!="normal":
+                    config['best_c']=best_c
             if args.save_flag == 1:
-                save_saver.save(sess, weights_save_path + 'weights_{}'.format(args.saveID), global_step=epoch)
+                save_saver.save(sess, weights_save_path + 'weights_{}_{}'.format(args.saveID, epoch))
                 print('save the weights in path: ', weights_save_path)
+                if best_epoch==epoch:
+                    config['best_name']=weights_save_path + 'weights_{}_{}'.format(args.saveID, epoch)
             
             # *********************************************************
             # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
             if should_stop == True and args.early_stop == 1:
                 if args.test != 'normal':
-                    with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
-                        f.write(str(config['best_c_epoch']))
+                #     with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
+                #         f.write(str(config['best_c_epoch']))
                     with open(weights_save_path + 'best_c_{}.txt'.format(args.saveID),'w') as f:
                         f.write(str(config['best_c']))
-                else:
-                    with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
-                        f.write(str(best_epoch))
+                # else:
+                with open(weights_save_path + 'best_epoch_{}.txt'.format(args.saveID),'w') as f:
+                    f.write(str(best_epoch))
                 break
+        
 
-        if args.test == 'rubi1' or args.test == 'rubi2' or args.test == 'rubiboth':
-            print(config['best_c_epoch'], config['best_c_hr'], config['best_c_ndcg'], config['best_c_recall'],config['best_c'])
-        else:
-            print(best_epoch, best_hr_norm)
-        print(best_str, end='')
+        saver.restore(sess, config['best_name'])
+        model.update_c(sess, config['best_c'])
+        
+        ret, _ = eval_test_ood.evaluate(model)
+        n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+        ret=n_ret
+        perf_str = 'test_ood: recall={}, ' \
+                            'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+        print(perf_str)
+        with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+            f.write(perf_str+"\n")
+        
+        if "new" in args.dataset:
+            ret, _ = eval_test_id.evaluate(model)
+            n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}
+            ret=n_ret
+            perf_str = 'test_id: recall={}, ' \
+                                'precision={}, hit={}, ndcg={}'.format(str(ret["recall"]),
+                                    str(ret['precision']), str(ret['hit_ratio']), str(ret['ndcg']))
+            print(perf_str)
+            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                f.write(perf_str+"\n")
+
+        # if args.test == 'rubi1' or args.test == 'rubi2' or args.test == 'rubiboth':
+        #     print(config['best_c_epoch'], config['best_c_hr'], config['best_c_ndcg'], config['best_c_recall'],config['best_c'])
+        # else:
+        #     print(best_epoch, best_hr_norm)
+        # print(best_str, end='')
 
 
 

@@ -29,7 +29,7 @@ def parse_args():
 
     parser.add_argument('--embed_size', type=int, default=64,
                         help='Embedding size.')
-    parser.add_argument('--layer_size', nargs='?', default='[64, 64, 64, 64]',
+    parser.add_argument('--layer_size', nargs='?', default='[]',
                         help='Output sizes of every layer')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
@@ -101,13 +101,30 @@ def parse_args():
 
 
     #new args
-    parser.add_argument('--neg_sample', type=int, default=128,
+    parser.add_argument('--neg_sample', type=int, default=32,
                         help='negative sample ratio.')    
-    parser.add_argument('--tau', type=int, default=1,
-                        help='temperature parameter, should be equal or greater than 1.')
-    parser.add_argument('--tau_info', type=int, default=0.1,
-                        help='temperature parameter for InfoNCE.')
-    parser.add_argument('--w_lambda', type=int, default=0.5,
+    parser.add_argument('--tau', type=float, default=0.2,
+                        help='temperature parameter for L1')
+    parser.add_argument('--tau_info', type=float, default=0.1,
+                        help='temperature parameter for L2')
+    parser.add_argument('--w_lambda', type=float, default=0.5,
                         help='weight for combining l1 and l2.')
+    parser.add_argument('--warm_up', type=int, default=5,
+                        help='warm up epochs for initial tau')
+    parser.add_argument('--tau_decay',type=float,default=1,
+                        help='the decay rate for tau, default 1 for no decay')
+    parser.add_argument('--tau_cut', type=float, default=0.05,
+                        help='min tau after decay')
+    parser.add_argument('--w_lambda_decay',type=float,default=1,
+                        help='the decay rate for w_lambda, default 1 for no decay')
+    parser.add_argument('--lambda_cut',type=float,default=0.05,
+                        help='min w_lambda after decay')
+    parser.add_argument('--freeze',type=int,default=0)
+    
+    parser.add_argument('--freeze_epoch',type=int,default=10)
+
+    parser.add_argument('--pop_branch',type=str,default="lightgcn")
+
+    parser.add_argument('--pop_reduct',type=int, default=0)
 
     return parser.parse_args()

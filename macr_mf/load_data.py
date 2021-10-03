@@ -25,30 +25,77 @@ class Data():
 
     def load_ori_data(self, args):
         self.path = './data/{}/'.format(args.dataset)
-        if args.model == 'mf' or args.model == 'biasmf' or args.model == 'dynmf':
-            if args.source=="dice":
-                self.path = "data/ml10m_dice/"
-                train_record = sp.load_npz(self.path+"train_coo_record.npz").tolil(copy=True)
-                train_skew_record = sp.load_npz(self.path+"train_skew_coo_record.npz").tolil(copy=True)
-                valid_record = sp.load_npz(self.path+"val_coo_record.npz").tolil(copy=True)
-                test_record = sp.load_npz(self.path+"test_coo_record.npz").tolil(copy=True)
-                self.n_users, self.n_items = train_record.shape[0], train_record.shape[1]
-                self.n_train = int(np.sum(train_record)+np.sum(train_skew_record))
-                self.n_test = int(np.sum(test_record))
-                self.n_valid = int(np.sum(valid_record))
-                for i in range(self.n_users):
-                    self.train_user_list[i] = train_record.rows[i] + train_skew_record.rows[i]
-                    self.test_user_list[i] = test_record.rows[i]
-                    self.valid_user_list[i] = valid_record.rows[i]
-                self.users = list(range(self.n_users))
-                self.items = list(range(self.n_items))
-                self.test_users = set(self.test_user_list.keys())
-                self.valid_users = set(self.valid_user_list.keys())
-            else:
-                train_file = self.path + 'train.txt'
-                valid_file = self.path + 'valid.txt'
-                test_file = self.path + 'test.txt'
-                with open(train_file) as f:
+        if args.source=="dice":
+            self.path = "data/ml10m_dice/"
+            train_record = sp.load_npz(self.path+"train_coo_record.npz").tolil(copy=True)
+            train_skew_record = sp.load_npz(self.path+"train_skew_coo_record.npz").tolil(copy=True)
+            valid_record = sp.load_npz(self.path+"val_coo_record.npz").tolil(copy=True)
+            test_record = sp.load_npz(self.path+"test_coo_record.npz").tolil(copy=True)
+            self.n_users, self.n_items = train_record.shape[0], train_record.shape[1]
+            self.n_train = int(np.sum(train_record)+np.sum(train_skew_record))
+            self.n_test = int(np.sum(test_record))
+            self.n_valid = int(np.sum(valid_record))
+            for i in range(self.n_users):
+                self.train_user_list[i] = train_record.rows[i] + train_skew_record.rows[i]
+                self.test_user_list[i] = test_record.rows[i]
+                self.valid_user_list[i] = valid_record.rows[i]
+            self.users = list(range(self.n_users))
+            self.items = list(range(self.n_items))
+            self.test_users = set(self.test_user_list.keys())
+            self.valid_users = set(self.valid_user_list.keys())
+        else:
+            train_file = self.path + 'train.txt'
+            valid_file = self.path + 'valid.txt'
+            test_file = self.path + 'test.txt'
+            test_id_file=self.path + 'test_id.txt'
+            self.evalsets={}
+            with open(train_file) as f:
+                for line in f.readlines():
+                    line = line.strip('\n').split(' ')
+                    if len(line) == 0:
+                        continue
+                    line = [int(i) for i in line]
+                    user = line[0]
+                    items = line[1:]
+                    if (len(items)==0):
+                        continue
+                    self.train_user_list[user] = items
+                    for item in items:
+                        self.train_item_list[item].append(user)
+                    self.n_users = max(self.n_users, user)
+                    self.n_items = max(self.n_items, max(items))
+                    self.n_train += len(items)
+            print('train')
+            print(max(self.train_user_list.keys()) + 1)
+            self.n_train_users = self.n_users
+            self.n_train_items = self.n_items
+            
+
+            
+
+            with open(test_file) as f:
+                for line in f.readlines():
+                    line = line.strip('\n').split(' ')
+                    if len(line) == 0:
+                        continue
+                    line = [int(i) for i in line]
+                    user = line[0]
+                    items = line[1:]
+                    if len(items) == 0:
+                        continue
+                    self.test_user_list[user] = items
+                    for item in items:
+                        self.test_item_list[item].append(user)
+                    self.n_users = max(self.n_users, user)
+                    self.n_items = max(self.n_items, max(items))
+                    self.n_test += len(items)
+            self.evalsets['test']= self.test_user_list
+            self.test_users = set(self.test_user_list.keys())
+
+            print('test')
+            print(max(self.test_user_list.keys()) + 1)
+            if ".new" in args.dataset:
+                with open(valid_file) as f:
                     for line in f.readlines():
                         line = line.strip('\n').split(' ')
                         if len(line) == 0:
@@ -56,105 +103,23 @@ class Data():
                         line = [int(i) for i in line]
                         user = line[0]
                         items = line[1:]
-                        if (len(items)==0):
+                        if len(items) == 0:
                             continue
-                        self.train_user_list[user] = items
+                        self.valid_user_list[user] = items
+                        self.valid_items.update(set(items))
                         for item in items:
-                            self.train_item_list[item].append(user)
+                            self.valid_item_list[item].append(user)
                         self.n_users = max(self.n_users, user)
                         self.n_items = max(self.n_items, max(items))
-                        self.n_train += len(items)
-                if args.valid_set=="valid":
-                    with open(valid_file) as f:
-                        for line in f.readlines():
-                            line = line.strip('\n').split(' ')
-                            if len(line) == 0:
-                                continue
-                            line = [int(i) for i in line]
-                            user = line[0]
-                            items = line[1:]
-                            if len(items) == 0:
-                                continue
-                            self.valid_user_list[user] = items
-                            self.valid_items.update(set(items))
-                            for item in items:
-                                self.valid_item_list[item].append(user)
-                            self.n_users = max(self.n_users, user)
-                            self.n_items = max(self.n_items, max(items))
-                            self.n_valid += len(items)
-                    self.valid_users = set(self.valid_user_list.keys())
-                if args.valid_set=="test":
-                    with open(test_file) as f:
-                        for line in f.readlines():
-                            line = line.strip('\n').split(' ')
-                            if len(line) == 0:
-                                continue
-                            line = [int(i) for i in line]
-                            user = line[0]
-                            items = line[1:]
-                            if len(items) == 0:
-                                continue
-                            self.test_user_list[user] = items
-                            for item in items:
-                                self.test_item_list[item].append(user)
-                            self.n_users = max(self.n_users, user)
-                            self.n_items = max(self.n_items, max(items))
-                            self.n_test += len(items)
-                    self.test_users = set(self.test_user_list.keys())
-                self.n_users = self.n_users + 1
-                self.n_items = self.n_items + 1
-                self.users = list(range(self.n_users))
-                self.items = list(range(self.n_items))
-                # for i in range(self.n_users):
-                #     for item in self.train_user_list[i]:
-                #         self.train_item_list[item].append(i)
-                #     for item in self.test_user_list[i]:
-                #         self.test_item_list[item].append(i)
-                #     for item in self.valid_user_list[i]:
-                #         self.valid_item_list[item].append(i)
-                #     self.n_train += len(self.train_user_list[i])
-                #     self.n_test += len(self.test_user_list[i])
-                #     self.n_valid += len(self.valid_user_list[i])
-            pop_user={key:len(value) for key,value in self.train_user_list.items()}
-            pop_item={key:len(value) for key,value in self.train_item_list.items()}
-            sorted_pop_user=list(set(list(pop_user.values())))
-            sorted_pop_item=list(set(list(pop_item.values())))
-            sorted_pop_user.sort()
-            sorted_pop_item.sort()
-            #print(sorted_pop_user)
-            #print(sorted_pop_item)
-            self.user_pop_num=len(sorted_pop_user)
-            self.item_pop_num=len(sorted_pop_item)
-            user_idx={}
-            item_idx={}
-            for i, item in enumerate(sorted_pop_user):
-                user_idx[item]=i
-            for i, item in enumerate(sorted_pop_item):
-                item_idx[item]=i
-            self.user_pop_idx={}
-            self.item_pop_idx={}
-            for key,value in pop_user.items():
-                self.user_pop_idx[key]=user_idx[value]
-            for key,value in pop_item.items():
-                self.item_pop_idx[key]=item_idx[value]
-                    
+                        self.n_valid += len(items)
+                self.valid_users = set(self.valid_user_list.keys())
+                self.evalsets['valid']= self.valid_user_list
 
-                
+                print('valid')
+                print(max(self.valid_user_list.keys()) + 1)
 
 
-                
-
-                
-        elif args.model == 'CausalE' or args.model == 'IPSmf':
-            if args.dataset == 'movielens_ml_10m' or args.dataset == 'movielens_ml_1m' or args.dataset == 'lastfm' or args.dataset == 'addressa'\
-                                                                    or args.dataset == 'kwai' or args.dataset == 'globe':
-                if args.skew == 1:
-                    train_file = self.path + 'skew_train.txt'
-                else:
-                    train_file = self.path + 'train.txt'
-                test_file = self.path + 'test.txt'
-
-                with open(train_file) as f:
+                with open(test_id_file) as f:
                     for line in f.readlines():
                         line = line.strip('\n').split(' ')
                         if len(line) == 0:
@@ -162,81 +127,109 @@ class Data():
                         line = [int(i) for i in line]
                         user = line[0]
                         items = line[1:]
-                        self.train_user_list[user] = items
-                        self.users.add(user)
-                        self.n_users = max(self.n_users, user)
-                        self.n_items = max(self.n_items, max(items))
-                        # self.n_train += len(items)
-
-                with open(test_file) as f:
-                    for line in f.readlines():
-                        line = line.strip('\n').split(' ')
-                        if len(line) == 0:
+                        if len(items) == 0:
                             continue
-                        line = [int(i) for i in line]
-                        user = line[0]
-                        items = line[1:]
-                        self.test_user_list[user] = items
+                        self.test_id_user_list[user] = items
+                        for item in items:
+                            self.test_id_item_list[item].append(user)
                         self.n_users = max(self.n_users, user)
                         self.n_items = max(self.n_items, max(items))
-                        # self.n_test += len(items)
-                self.n_users = self.n_users + 1
-                if args.dataset == 'movielens_ml_10m':
-                    self.n_items = 8790
-                elif args.dataset == 'movielens_ml_1m':
-                    self.n_items = 3125
-                elif args.dataset == 'lastfm':
-                    self.n_items = 2822
-                elif args.dataset == 'addressa':
-                    self.n_items = 744
-                elif args.dataset == 'kwai':
-                    self.n_items = 80524
-                elif args.dataset == 'globe':
-                    self.n_items = 12005
-                # self.users = list(range(self.n_users))
-                self.items = list(range(self.n_items))
-                self.users = list(self.users)
+                        self.n_test += len(items)
+                self.evalsets['test_id']= self.test_id_user_list
+
+
+                print('test_id')
+                print(max(self.test_id_user_list.keys()) + 1)
+
+            
 
 
 
-                countTrainItem = {}
-                countTestItem = {}
-                countTrainInters = [0,0,0]
-                countTestInters = [0,0,0]
-                for i in range(self.n_users):
-                    for item in self.train_user_list[i]:
-                        self.train_item_list[item].append(i)
-                        if item not in countTrainItem.keys():
-                            countTrainItem[item] = 0
-                        countTrainItem[item] += 1
-                    for item in self.test_user_list[i]:
-                        self.test_item_list[item].append(i)
-                        if item not in countTestItem:
-                            countTestItem[item] = 0
-                        countTestItem[item] += 1
-                    self.n_train += len(self.train_user_list[i])
-                    self.n_test += len(self.test_user_list[i])
-                topNum = [0.01, 0.05, 0.1]
-                topNum1 = [int(i * len(self.train_item_list)) for i in topNum]
-                topNum2 = [int(i * len(self.test_item_list)) for i in topNum]
-                # print(topNum1, topNum2)
-                countTrainItem = [heapq.nlargest(i, countTrainItem, key = countTrainItem.get) for i in topNum1]
-                countTestItem = [heapq.nlargest(i, countTestItem, key = countTestItem.get) for i in topNum2]
-                # print(countTrainItem, countTestItem)
 
-                for user, items in self.train_user_list.items():
-                    for item in items:
-                        for i in range(len(topNum)):
-                            if item in countTrainItem[i]:
-                                countTrainInters[i] += 1
-                for user, items in self.test_user_list.items():
-                    for item in items:
-                        for i in range(len(topNum)):
-                            if item in countTestItem[i]:
-                                countTestInters[i] += 1
-                
-                for i in range(3):
-                    print(countTrainInters[i]/self.n_train, countTestInters[i]/self.n_test, len(countTrainItem[i]), len(countTestItem[i]), len(set(countTestItem[i])&set(countTrainItem[i])))
+            self.n_users = self.n_users + 1
+            self.n_items = self.n_items + 1
+            print(self.n_users)
+            print(self.n_items)
+            
+
+            
+            # for i in range(self.n_users):
+            #     for item in self.train_user_list[i]:
+            #         self.train_item_list[item].append(i)
+            #     for item in self.test_user_list[i]:
+            #         self.test_item_list[item].append(i)
+            #     for item in self.valid_user_list[i]:
+            #         self.valid_item_list[item].append(i)
+            #     self.n_train += len(self.train_user_list[i])
+            #     self.n_test += len(self.test_user_list[i])
+            #     self.n_valid += len(self.valid_user_list[i])
+        pop_user={key:len(value) for key,value in self.train_user_list.items()}
+        pop_item={key:len(value) for key,value in self.train_item_list.items()}
+        sorted_pop_user=list(set(list(pop_user.values())))
+        sorted_pop_item=list(set(list(pop_item.values())))
+        sorted_pop_user.sort()
+        sorted_pop_item.sort()
+        #print(sorted_pop_user)
+        #print(sorted_pop_item)
+        self.user_pop_num=len(sorted_pop_user)
+        self.item_pop_num=len(sorted_pop_item)
+        user_idx={}
+        item_idx={}
+        for i, item in enumerate(sorted_pop_user):
+            user_idx[item]=i
+        for i, item in enumerate(sorted_pop_item):
+            item_idx[item]=i
+        self.user_pop_idx={}
+        self.item_pop_idx={}
+        for key,value in pop_user.items():
+            self.user_pop_idx[key]=user_idx[value]
+        for key,value in pop_item.items():
+            self.item_pop_idx[key]=item_idx[value]
+
+        def get_degrees(dataset, n_node):
+            degrees = np.array(
+                [len(dataset[u]) if u in dataset else 0 for u in range(n_node)],
+                dtype=np.int32)
+            return degrees
+        
+        def invert_dict(d, sort=False):
+            inverse = {}
+            for key in d:
+                for value in d[key]:
+                    if value not in inverse:
+                        inverse[value] = [key]
+                    else:
+                        inverse[value].append(key)
+            return inverse
+
+        
+        self.train=self.train_user_list
+        self.train_inverse=invert_dict(self.train)
+
+        self.users = list(range(self.n_users))
+        self.items = list(range(self.n_items))
+
+
+        self.u_degrees = get_degrees(self.train, self.n_users)
+        self.i_degrees = get_degrees(self.train_inverse, self.n_items)
+ 
+        self.train = [
+            self.train_user_list[u] if u in self.train_user_list else []
+            for u in range(self.n_users)
+        ]
+        self.train_inverse = [
+            self.train_inverse[i] if i in self.train_inverse else []
+            for i in range(self.n_items)
+        ]
+        self.u_interacts = []
+        self.i_interacts = []
+        for u, items in enumerate(self.train):
+            for i in items:
+                self.u_interacts.append(u)
+                self.i_interacts.append(i)
+        self.u_interacts = np.array(self.u_interacts, dtype=np.int32)
+        self.i_interacts = np.array(self.i_interacts, dtype=np.int32)
+        self.n_interact = self.u_interacts.shape[0]
 
     def load_imb_data(self):
         if args.model == 'mf':
@@ -546,6 +539,9 @@ class Data():
         self.test_item_list = collections.defaultdict(list)
         self.valid_user_list = collections.defaultdict(list)
         self.valid_item_list = collections.defaultdict(list)
+        self.test_id_user_list = collections.defaultdict(list)
+        self.test_id_item_list = collections.defaultdict(list)
+
         self.users = set()
         self.items = set()
         
