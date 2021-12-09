@@ -126,5 +126,9 @@ def parse_args():
     parser.add_argument('--pop_branch',type=str,default="lightgcn")
 
     parser.add_argument('--pop_reduct',type=int, default=0)
+    
+    parser.add_argument('--inbatch_sample',type=int,default=1)
 
+    parser.add_argument('--cf_pen', type=float, default=0.1,
+                        help='Imbalance loss.')
     return parser.parse_args()

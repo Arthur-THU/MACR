@@ -73,10 +73,10 @@ class ProxyEvaluator(AbstractEvaluator):
         """
         super(ProxyEvaluator, self).__init__()
         if group_view is not None:
-            self.evaluator = GroupedEvaluator(user_train_dict, user_test_dict, user_neg_test,
+            self.evaluator = GroupedEvaluator(dataset,user_train_dict, user_test_dict, user_neg_test,
                                               metric=metric, group_view=group_view,
                                               top_k=top_k, batch_size=batch_size,
-                                              num_thread=num_thread)
+                                              num_thread=num_thread,dump_dict=dump_dict)
         else:
             self.evaluator = UniEvaluator(dataset, user_train_dict, user_test_dict, user_neg_test,
                                           metric=metric, top_k=top_k,

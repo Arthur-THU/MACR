@@ -1013,7 +1013,10 @@ class DYNMF:
         self.tau = args.tau
         self.temp = args.tau_info
         self.w_lambda = args.w_lambda
-        self.neg_sample=args.neg_sample
+        if args.neg_sample>0:
+            self.neg_sample=args.neg_sample
+        else:
+            self.neg_sample=args.batch_size-1
         self.pop_partition_user=user_pop_num
         self.pop_partition_item=item_pop_num
 
@@ -1158,7 +1161,7 @@ class DYNMF:
         reg_loss_freeze=self.decay * (regularizer2)
         reg_loss_norm=self.decay * (regularizer1)
 
-        return loss1, loss2, reg_loss, reg_loss_freeze, reg_loss_norm, loss_mf,debug
+        return loss1, loss2, reg_loss, reg_loss_freeze, reg_loss_norm, loss_mf
 
     def _statistics_params(self):
         # number of params
@@ -1549,7 +1552,7 @@ class CausalE:
         pos_item_embedding = tf.nn.embedding_lookup(self.weights['item_embedding'], self.pos_items)
         neg_item_embedding = tf.nn.embedding_lookup(self.weights['item_embedding'], self.neg_items)
         item_embedding = tf.nn.embedding_lookup(self.weights['item_embedding'], self.items)
-        control_embedding = tf.stop_gradient(tf.nn.embedding_lookup(self.weights['item_embedding'], 0))#self.reg_items))
+        control_embedding = tf.stop_gradient(tf.nn.embedding_lookup(self.weights['item_embedding'], self.reg_items))
         self.batch_ratings = tf.matmul(user_embedding, pos_item_embedding, transpose_a=False, transpose_b = True)    #prediction, shape(user_embedding) != shape(pos_item_embedding)
 
         self.mf_loss, self.reg_loss, self.cf_loss = self.create_bpr_loss(user_embedding, pos_item_embedding, neg_item_embedding, item_embedding, control_embedding)
@@ -1563,7 +1566,7 @@ class CausalE:
 
     def init_weights(self):
         weights = dict()
-        self.initializer = tf.contrib.layers.xavier_initializer()
+        self.initializer = tf.random_normal_initializer(mean=0.0, stddev=0.01, seed=None)#tf.contrib.layers.xavier_initializer()
         weights['user_embedding'] = tf.Variable(self.initializer([self.n_users, self.emb_dim]), name = 'user_embedding')
         weights['item_embedding'] = tf.Variable(self.initializer([self.n_items * 2, self.emb_dim]), name = 'item_embedding')
         

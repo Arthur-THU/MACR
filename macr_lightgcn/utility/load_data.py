@@ -2,7 +2,6 @@
 Created on Oct 10, 2018
 Tensorflow Implementation of Neural Graph Collaborative Filtering (NGCF) model in:
 Wang Xiang et al. Neural Graph Collaborative Filtering. In SIGIR 2019.
-
 @author: Xiang Wang (xiangwang@u.nus.edu)
 '''
 import numpy as np
@@ -167,6 +166,7 @@ class Data(object):
             
         pop_user={key:len(value) for key,value in self.train_user_list.items()}
         pop_item={key:len(value) for key,value in self.train_item_list.items()}
+        self.pop_item=pop_item
         sorted_pop_user=list(set(list(pop_user.values())))
         sorted_pop_item=list(set(list(pop_item.values())))
         sorted_pop_user.sort()
@@ -249,19 +249,22 @@ class Data(object):
         self.n_interact = self.u_interacts.shape[0]
             
     def get_adj_mat(self,is_pop=False):
-        # try:
-        #     t1 = time()
-        #     adj_mat = sp.load_npz(self.path + '/s_adj_mat.npz')
-        #     norm_adj_mat = sp.load_npz(self.path + '/s_norm_adj_mat.npz')
-        #     mean_adj_mat = sp.load_npz(self.path + '/s_mean_adj_mat.npz')
-        #     print('already load adj matrix', adj_mat.shape, time() - t1)
-        
-        # except Exception:
+
+        name="pop" if is_pop else ""
+        try:
+            t1 = time()
+            adj_mat = sp.load_npz(self.path + '/s_adj_mat'+name+'.npz')
+            norm_adj_mat = sp.load_npz(self.path + '/s_norm_adj_mat'+name+'.npz')
+            mean_adj_mat = sp.load_npz(self.path + '/s_mean_adj_mat'+name+'.npz')
+            pre_adj_mat = sp.load_npz(self.path + '/s_pre_adj_mat'+name+'.npz')
+            print('already load adj matrix', adj_mat.shape, time() - t1)
+            return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat
+        except Exception:
+            print('calculating adj matrix...')
+                    
         adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat(is_pop)
-        sp.save_npz(self.path + '/s_adj_mat.npz', adj_mat)
-        sp.save_npz(self.path + '/s_norm_adj_mat.npz', norm_adj_mat)
-        sp.save_npz(self.path + '/s_mean_adj_mat.npz', mean_adj_mat)
-            
+        
+
         # try:
         #     pre_adj_mat = sp.load_npz(self.path + '/s_pre_adj_mat.npz')
         # except Exception:
@@ -275,7 +278,10 @@ class Data(object):
         norm_adj = norm_adj.dot(d_mat_inv)
         print('generate pre adjacency matrix.')
         pre_adj_mat = norm_adj.tocsr()
-        sp.save_npz(self.path + '/s_pre_adj_mat.npz', norm_adj)
+        sp.save_npz(self.path + '/s_pre_adj_mat'+name+'.npz', norm_adj)
+        sp.save_npz(self.path + '/s_adj_mat'+name+'.npz', adj_mat)
+        sp.save_npz(self.path + '/s_norm_adj_mat'+name+'.npz', norm_adj_mat)
+        sp.save_npz(self.path + '/s_mean_adj_mat'+name+'.npz', mean_adj_mat)
             
         return adj_mat, norm_adj_mat, mean_adj_mat,pre_adj_mat
 
@@ -505,7 +511,8 @@ class Data(object):
                 state = '#inter per user<=[%d], #users=[%d], #all rates=[%d]' % (n_iids, len(temp), n_rates)
                 split_state.append(state)
                 print(state)
-
+    
+    
 
 
         return split_uids, split_state
@@ -515,6 +522,80 @@ class Data(object):
             if self.train_items.__contains__(uid) and self.test_set.__contains__(uid):
                 if len(set(self.train_items[uid]) & set(self.test_set[uid]))!=0:
                     print(uid)
+    
+
+    def sample_cause(self):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
+
+        pos_items, neg_items = [], []
+
+        for user in users:
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                item=rd.choice(self.train_user_list[user])
+                weight=0.1*self.n_train/len(self.pop_item)/self.pop_item[item]
+                if weight>=1:
+                    weight=0#/self.pop_item[item]
+                rad=rd.random()
+                if rad<weight:
+                    item=item+self.n_items
+                pos_items.append(item)
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user]:
+                    neg_items.append(neg_item)
+                    break
+
+        for i in range(len(users)):
+            if pos_items[i] >= self.n_items:
+                neg_items[i] += self.n_items
+        
+        all_items=pos_items+neg_items
+        ctrl_items = [i+self.n_items if i<self.n_items else i-self.n_items for i in all_items]
+
+        return users, pos_items, neg_items, all_items, ctrl_items
+
+    
+
+    def sample_infonce_test(self,user_pop_idx,item_pop_idx,method="infonce"):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.test_user_list.keys(), self.batch_size)
+        else:
+            users = [rd.choice(self.test_user_list.keys()) for _ in range(self.batch_size)]
+        
+        if method=="infonce":
+            neg_sample=self.neg_sample
+        else:
+            neg_sample=1
+        
+        users_pop = []
+
+        pos_items, neg_items = [], []
+        pos_items_pop,neg_items_pop = [], []
+
+        for user in users:
+            if self.test_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                pos_items.append(rd.choice(self.test_user_list[user]))
+            cnt=0
+
+            #neg_items=rd.sample(self.train_sus_list, 64)
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user] and neg_item not in self.valid_user_list[user] and neg_item not in self.test_user_list[user] and neg_item not in self.test_id_user_list:
+                    neg_items.append(neg_item)
+                    cnt+=1
+                    if cnt==neg_sample:
+                        break
+
+        return users, pos_items, neg_items
+    
+
 
     def sample_infonce(self,user_pop_idx,item_pop_idx):
         if self.batch_size <= self.n_users:
@@ -538,6 +619,8 @@ class Data(object):
             else:
                 pos_items.append(rd.choice(self.train_user_list[user]))
             cnt=0
+
+            #neg_items=rd.sample(self.train_sus_list, 64)
             while True:
                 neg_item = rd.choice(self.items)
                 if neg_item not in self.train_user_list[user]:
@@ -545,12 +628,6 @@ class Data(object):
                     cnt+=1
                     if cnt==self.neg_sample:
                         break
-
-        for i in range(len(users)):
-            if pos_items[i] >= self.n_items:
-                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
-                    neg_items[p] += self.n_items
-        
 
         for item in pos_items:
             if item in item_pop_idx:
@@ -567,4 +644,42 @@ class Data(object):
         return users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop
 
 
+    def sample_infonce_inbatch(self,user_pop_idx,item_pop_idx):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
 
+        
+        users_pop = []
+
+        pos_items, neg_items = [], []
+        pos_items_pop,neg_items_pop = [], []
+
+        for user in users:
+            if user in user_pop_idx:
+                users_pop.append(user_pop_idx[user])
+            else:
+                users_pop.append(0)
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                pos_items.append(rd.choice(self.train_user_list[user]))
+
+        for item in pos_items:
+            if item in item_pop_idx:
+                pos_items_pop.append(item_pop_idx[item])
+            else:
+                pos_items_pop.append(0)
+        
+
+        pos_items=np.array(pos_items)
+        pos_items_pop=np.array(pos_items_pop)
+
+        neg_items=np.tile(pos_items,(pos_items.shape[0],1))
+        neg_items_pop=np.tile(pos_items_pop,(pos_items_pop.shape[0],1))
+
+        neg_items=np.reshape(neg_items[~np.eye(neg_items.shape[0],dtype=bool)],-1)
+        neg_items_pop=np.reshape(neg_items_pop[~np.eye(neg_items_pop.shape[0],dtype=bool)],-1)
+
+        return users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop

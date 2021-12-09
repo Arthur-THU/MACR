@@ -22,13 +22,13 @@ def parse_args():
                         help='alpha')
     parser.add_argument('--verbose', type=int, default=1,
                         help='Interval of evaluation.')
-    parser.add_argument('--epoch', type=int, default=400,
+    parser.add_argument('--epoch', type=int, default=5000,
                         help='Number of epoch.')
     parser.add_argument('--embed_size', type=int, default=64,
                         help='Embedding size.')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
-    parser.add_argument('--Ks', nargs='?', default='[20]',
+    parser.add_argument('--Ks', nargs='?', default='[5]',
                         help='Evaluate on Ks optimal items.')
     parser.add_argument('--epochs', nargs='?', default='[]',
                         help='Test c on these epochs.')

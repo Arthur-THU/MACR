@@ -10,15 +10,20 @@ Parallelized sampling on CPU
 C++ evaluation for top-k recommendation
 '''
 
+
 import os
 import sys
 import threading
 import tensorflow as tf
+from util import DataIterator
 from tensorflow.python.client import device_lib
 from tqdm import tqdm
 from utility.helper import *
 from utility.batch_test import *
+from utility.visualization import plot_tsne_embed
 from evaluator import ProxyEvaluator
+import scipy.sparse as sp
+
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
@@ -29,7 +34,7 @@ gpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'GPU
 cpus = [x.name for x in device_lib.list_local_devices() if x.device_type == 'CPU']
 
 class LightGCN(object):
-    def __init__(self, data_config, pretrain_data,user_pop_num=-1,item_pop_num=-1,user_pop=None,item_pop=None,pop_branch="lightgcn",pop_reduct=0):
+    def __init__(self, data_config, pretrain_data,user_pop_num=-1,item_pop_num=-1,user_pop=None,item_pop=None,pop_branch="lightgcn",pop_reduct=0,p_matrix=None):
         # argument settings
         self.model_type = 'LightGCN'
         self.adj_type = args.adj_type
@@ -44,6 +49,7 @@ class LightGCN(object):
         self.norm_adj_pop = data_config['norm_adj_pop']
         self.n_nonzero_elems = self.norm_adj.count_nonzero()
         self.lr = args.lr
+        self.cf_pen = args.cf_pen
         self.emb_dim = args.embed_size
         self.batch_size = args.batch_size
         self.weight_size = eval(args.layer_size)
@@ -55,29 +61,42 @@ class LightGCN(object):
         self.Ks = eval(args.Ks)
         self.user_pop_idx=tf.constant([user_pop[i] for i in range(self.n_users)])
         self.item_pop_idx=tf.constant([item_pop[i] for i in range(self.n_items)])
+        
 
         
 
         self.tau = args.tau
         self.temp = args.tau_info
         self.w_lambda = args.w_lambda
-        self.neg_sample=args.neg_sample
+        if args.loss=="mf_info" or args.loss=="dyninfo":
+            if not args.inbatch_sample:
+                self.neg_sample=args.neg_sample
+            else:
+                self.neg_sample=args.batch_size-1
+        else:
+            self.neg_sample=args.neg_sample
         self.pop_partition_user=user_pop_num
         self.pop_partition_item=item_pop_num
-
 
         '''
         *********************************************************
         Create Placeholder for Input Data & Dropout.
         '''
+        self.p = tf.constant(value = p_matrix, dtype = tf.float32)
         # placeholder definition
         self.users = tf.placeholder(tf.int32, shape=(None,))
         self.pos_items = tf.placeholder(tf.int32, shape=(None,))
         self.neg_items = tf.placeholder(tf.int32, shape=(None,))
+        self.items = tf.placeholder(tf.int32, shape=(None,))
+        self.ctrl_items = tf.placeholder(tf.int32, shape=(None,))
+        self.pos_item_p = tf.nn.embedding_lookup(self.p, self.pos_items)
+        self.neg_item_p = tf.nn.embedding_lookup(self.p, self.neg_items)
 
         self.users_pop = tf.placeholder(tf.int32, shape = (None,))
         self.pos_items_pop = tf.placeholder(tf.int32, shape = (None,))
         self.neg_items_pop = tf.placeholder(tf.int32, shape = (None,))
+
+        
         
         self.node_dropout_flag = args.node_dropout_flag
         self.node_dropout = tf.placeholder(tf.float32, shape=[None])
@@ -146,6 +165,8 @@ class LightGCN(object):
         if self.alg_type in ['lightgcn']:
             self.ua_embeddings, self.ia_embeddings = self._create_lightgcn_embed()
             self.ua_pop_embeddings,self.ia_pop_embeddings = self._create_lightgcn_embed(is_pop=True)
+        
+        
 
             
         elif self.alg_type in ['ngcf']:
@@ -161,12 +182,17 @@ class LightGCN(object):
         *********************************************************
         Establish the final representations for user-item pairs in batch.
         """
+
+        self.caus_e_i = tf.concat([self.ia_embeddings,self.weights['ctrl_embedding']],axis=0)
         self.u_g_embeddings = tf.nn.embedding_lookup(self.ua_embeddings, self.users)
-        self.pos_i_g_embeddings = tf.nn.embedding_lookup(self.ia_embeddings, self.pos_items)
-        self.neg_i_g_embeddings = tf.nn.embedding_lookup(self.ia_embeddings, self.neg_items)
+        self.pos_i_g_embeddings = tf.nn.embedding_lookup(self.caus_e_i, self.pos_items)
+        self.neg_i_g_embeddings = tf.nn.embedding_lookup(self.caus_e_i, self.neg_items)
+        self.ctrl_i_g_embeddings = tf.nn.embedding_lookup(self.caus_e_i, self.ctrl_items)
+        self.all_i_g_embeddings = tf.nn.embedding_lookup(self.caus_e_i, self.items)
         self.u_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['user_embedding'], self.users)
         self.pos_i_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['item_embedding'], self.pos_items)
         self.neg_i_g_embeddings_pre = tf.nn.embedding_lookup(self.weights['item_embedding'], self.neg_items)
+
 
 
         
@@ -230,6 +256,12 @@ class LightGCN(object):
         self.opt_mf_info = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_mf_info)
 
 
+        self.cause_mf_loss, self.cause_reg_loss, self.cause_cf_loss = self.create_cause_loss(self.u_g_embeddings, self.pos_i_g_embeddings, self.neg_i_g_embeddings,self.all_i_g_embeddings, self.ctrl_i_g_embeddings)
+        self.loss_cause = self.cause_mf_loss + self.cause_reg_loss + self.cause_cf_loss
+
+        self.opt_cause = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_cause)
+
+
         self.mf_loss, self.emb_loss, self.reg_loss = self.create_bpr_loss(self.u_g_embeddings,
                                                                           self.pos_i_g_embeddings,
                                                                           self.neg_i_g_embeddings)
@@ -267,6 +299,13 @@ class LightGCN(object):
                                                                           self.neg_i_g_embeddings)
         self.loss_two_bce2 = self.mf_loss_two_bce2 + self.emb_loss_two_bce2
         self.opt_two_bce2 = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss_two_bce2)
+
+
+        self.ipw_mf_loss, self.ipw_reg_loss = self.create_ipw_loss(self.u_g_embeddings, self.pos_i_g_embeddings, self.neg_i_g_embeddings, self.pos_item_p, self.neg_item_p)
+
+        self.ipw_loss = self.ipw_mf_loss + self.ipw_reg_loss
+
+        self.opt_ipw = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.ipw_loss)
     
     
     def create_model_str(self):
@@ -280,10 +319,12 @@ class LightGCN(object):
     def _init_weights(self):
         all_weights = dict()
         initializer = tf.contrib.layers.xavier_initializer()
+        #initializer = tf.random_normal_initializer(mean=0.0, stddev=0.01, seed=None)
         all_weights["constant_embedding"] = tf.Variable(tf.ones([1, self.emb_dim]), name='constant_embedding')
         if self.pretrain_data is None:
             all_weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
             all_weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
+            all_weights['ctrl_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='ctrl_embedding')
             print('using xavier initialization')
         else:
             all_weights['user_embedding'] = tf.Variable(initial_value=self.pretrain_data['user_embed'], trainable=True,
@@ -507,9 +548,32 @@ class LightGCN(object):
         u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
         return u_g_embeddings, i_g_embeddings
 
+    def create_ipw_loss(self, users, pos_items, neg_items, pos_item_p, neg_item_p):
+        pos_scores = tf.sigmoid(tf.reduce_sum(tf.multiply(users, pos_items), axis=1))   #users, pos_items, neg_items have the same shape
+        neg_scores = tf.sigmoid(tf.reduce_sum(tf.multiply(users, neg_items), axis=1))
+        
+        self.temp2 = pos_item_p
+        self.temp3 = tf.divide(pos_scores, pos_item_p)
+
+        regularizer = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
+        regularizer = regularizer/self.batch_size
+
+        # maxi = tf.log(tf.nn.sigmoid(pos_scores - neg_scores))
+
+        weighted_pos_item_score=tf.multiply(pos_scores, tf.sigmoid(1/pos_item_p))*10
+        weighted_neg_item_score=tf.multiply(neg_scores, tf.sigmoid(1/neg_item_p))*10
+
+        pos_item_score_exp=tf.exp(weighted_pos_item_score)
+        neg_item_score_exp=tf.exp(weighted_neg_item_score)
+
+        mf_loss=tf.reduce_mean(tf.negative(tf.log(pos_item_score_exp/(pos_item_score_exp+neg_item_score_exp))))
+        reg_loss = self.decay * regularizer
+        return mf_loss, reg_loss
+
+
     def create_bpr_loss(self, users, pos_items, neg_items):
-        pos_scores = tf.nn.sigmoid(tf.reduce_sum(tf.multiply(users, pos_items), axis=1))   #users, pos_items, neg_items have the same shape
-        neg_scores = tf.nn.sigmoid(tf.reduce_sum(tf.multiply(users, neg_items), axis=1))
+        pos_scores = tf.reduce_sum(tf.multiply(users, pos_items), axis=1)   #users, pos_items, neg_items have the same shape
+        neg_scores = tf.reduce_sum(tf.multiply(users, neg_items), axis=1)
         
         regularizer = tf.nn.l2_loss(self.u_g_embeddings_pre) + tf.nn.l2_loss(
                 self.pos_i_g_embeddings_pre) + tf.nn.l2_loss(self.neg_i_g_embeddings_pre)
@@ -523,6 +587,27 @@ class LightGCN(object):
         reg_loss = tf.constant(0.0, tf.float32, [1])
 
         return mf_loss, emb_loss, reg_loss
+
+    
+    def create_cause_loss(self, users, pos_items, neg_items, item_embed, control_embed):
+        pos_scores = tf.reduce_sum(tf.multiply(users, pos_items), axis=1)   #users, pos_items, neg_items have the same shape
+        neg_scores = tf.reduce_sum(tf.multiply(users, neg_items), axis=1)
+
+        regularizer = tf.nn.l2_loss(users) + tf.nn.l2_loss(pos_items) + tf.nn.l2_loss(neg_items)
+        regularizer = regularizer/self.batch_size
+
+        maxi = tf.log(tf.nn.sigmoid(pos_scores - neg_scores)+1e-10)
+
+        mf_loss = tf.negative(tf.reduce_mean(maxi))
+        reg_loss = self.decay * regularizer
+
+        #counter factual loss
+
+        #cf_loss = tf.reduce_mean(tf.reduce_sum(tf.abs(tf.subtract(item_embed, control_embed)), axis=1))
+        cf_loss = tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(tf.nn.l2_normalize(item_embed,axis=0), tf.nn.l2_normalize(control_embed,axis=0)))))
+        cf_loss = cf_loss * self.cf_pen #/ self.batch_size
+
+        return mf_loss, reg_loss, cf_loss
 
     def create_bce_loss(self, users, pos_items, neg_items):
         pos_scores = tf.nn.sigmoid(tf.reduce_sum(tf.multiply(users, pos_items), axis=1))   #users, pos_items, neg_items have the same shape
@@ -559,14 +644,14 @@ class LightGCN(object):
         neg_item_pop_prod=tf.reduce_sum(tf.multiply(tiled_usr_pop,neg_items_pop),axis=1)
         pos_item_prod=tf.reduce_sum(tf.multiply(users,pos_items),axis=1)
         neg_item_prod=tf.reduce_sum(tf.multiply(tiled_usr,neg_items),axis=1)
-        pos_item_score=tf.sigmoid(pos_item_prod)
-        neg_item_score=tf.sigmoid(neg_item_prod)
+        #pos_item_score=tf.sigmoid(pos_item_prod)
+        #neg_item_score=tf.sigmoid(neg_item_prod)
         # pos_item_pop_score=tf.sigmoid(pos_item_pop_prod)/self.temp
         # neg_item_pop_score=tf.sigmoid(neg_item_pop_prod)/self.temp
 
 
-        #pos_item_score=pos_item_prod/user_n2/pos_item_n2
-        #neg_item_score=neg_item_prod/tiled_usr_n2/neg_item_n2
+        pos_item_score=pos_item_prod/user_n2/pos_item_n2
+        neg_item_score=neg_item_prod/tiled_usr_n2/neg_item_n2
         pos_item_pop_score=pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/self.temp
         neg_item_pop_score=neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/self.temp
 
@@ -583,6 +668,25 @@ class LightGCN(object):
 
         weighted_pos_item_score=tf.multiply(pos_item_score,tf.sigmoid(pos_item_pop_prod))/self.tau
         weighted_neg_item_score=tf.multiply(neg_item_score,tf.sigmoid(neg_item_pop_prod))/self.tau
+
+        self.ensemble_pos_score=weighted_pos_item_score
+        self.ensemble_neg_score=weighted_neg_item_score
+
+        self.pop_pos_score=pos_item_pop_score
+        self.pop_neg_score=neg_item_pop_score
+
+        self.pos_score=pos_item_score/self.tau
+        self.neg_score=neg_item_score/self.tau
+
+        self.ensemble_pos_score_ori=tf.multiply(pos_item_prod,tf.sigmoid(pos_item_pop_score))
+        self.ensemble_neg_score_ori=tf.multiply(neg_item_prod,tf.sigmoid(neg_item_pop_score))
+
+        self.pop_pos_score_ori=pos_item_pop_prod
+        self.pop_neg_score_ori=neg_item_pop_prod
+
+        self.pos_score_ori=pos_item_prod
+        self.neg_score_ori=neg_item_prod
+
         #weighted_pos_item_score=tf.multiply(pos_item_score,pos_item_pop_prod/user_pop_n2/pos_item_pop_n2/2+0.5)/self.tau
         #weighted_neg_item_score=tf.multiply(neg_item_score,neg_item_pop_prod/tiled_usr_pop_n2/neg_item_pop_n2/2+0.5)/self.tau
         neg_item_score_exp=tf.reduce_sum(tf.exp(tf.reshape(weighted_neg_item_score,[-1,self.neg_sample])),axis=1)
@@ -600,6 +704,48 @@ class LightGCN(object):
         reg_loss_norm=self.decay * (regularizer1)
 
         return loss1, loss2, reg_loss, reg_loss_freeze, reg_loss_norm, loss_mf, debug
+    
+    def compute_loss_for_correlation(self,pos_score,neg_score,method="infonce"):
+        if method=="infonce":
+            neg_exp = np.sum(np.exp(np.reshape(neg_score,[-1,self.neg_sample])),axis=1)
+            pos_exp=np.exp(pos_score)
+            loss=-np.log(pos_exp/(pos_exp+neg_exp))
+        else:
+            loss=np.log(1/(1 + np.exp(neg_score-pos_score))+1e-10)
+        return loss
+
+    
+    def get_score(self, users, pos_items, neg_items, method="infonce",loss="dyninfo"):
+        if method=="infonce":
+            if loss=="dyninfo":
+                to_com=[self.ensemble_pos_score,self.ensemble_neg_score,self.pop_pos_score,self.pop_neg_score,self.pos_score,self.neg_score]
+                data = self.sess.run(to_com, {self.users: users,
+                                                            self.pos_items: pos_items,
+                                                            self.neg_items: neg_items})
+            else:
+                to_com=[self.pos_score,self.neg_score]
+                data = self.sess.run(to_com, {self.users: users,
+                                                            self.pos_items: pos_items,
+                                                            self.neg_items: neg_items})
+        else:
+            if loss=="dyninfo":
+                to_com=[self.ensemble_pos_score_ori,self.ensemble_neg_score_ori,self.pop_pos_score_ori,self.pop_neg_score_ori,self.pos_score_ori,self.neg_score_ori]
+                data = self.sess.run(to_com, {self.users: users,
+                                                            self.pos_items: pos_items,
+                                                            self.neg_items: neg_items})
+            else:
+                to_com=[self.pos_score_ori,self.neg_score_ori]
+                data = self.sess.run(to_com, {self.users: users,
+                                                            self.pos_items: pos_items,
+                                                            self.neg_items: neg_items})
+
+
+        return data
+            
+        
+
+
+
 
     def create_bce_loss_two_brach1(self, users, pos_items, neg_items):
         pos_scores = tf.reduce_sum(tf.multiply(users, pos_items), axis=1)   #users, pos_items, neg_items have the same shape
@@ -757,6 +903,13 @@ class LightGCN(object):
                                                         self.pos_items: items,
                                                         self.node_dropout: [0.] * len(self.weight_size),
                                                         self.mess_dropout: [0.] * len(self.weight_size)})
+        elif self.method == 'most_pop':
+            rate_batch = self.sess.run(self.pos_item_p, {self.users: users,
+                                                        self.pos_items: items,
+                                                        self.node_dropout: [0.] * len(self.weight_size),
+                                                        self.mess_dropout: [0.] * len(self.weight_size)})
+            rate_batch = np.tile(np.array(rate_batch),(len(users),1))
+
 
             
 
@@ -774,16 +927,26 @@ def load_pretrained_data():
 
 # parallelized sampling on CPU 
 class sample_thread(threading.Thread):
-    def __init__(self,pop=0):
+    def __init__(self,pop=0,inbatch=1):
         self.pop=pop
+        self.inbatch=inbatch
         threading.Thread.__init__(self)
     def run(self):
-        if not self.pop:
+        if self.pop==0:
             with tf.device(cpus[0]):
                 self.data = data_generator.sample()
+        elif self.pop==1:
+            if self.inbatch==1:
+                with tf.device(cpus[0]):
+                    self.data = data_generator.sample_infonce_inbatch(data_generator.user_pop_idx,data_generator.item_pop_idx)
+            else:
+                with tf.device(cpus[0]):
+                    self.data = data_generator.sample_infonce(data_generator.user_pop_idx,data_generator.item_pop_idx)
+
         else:
             with tf.device(cpus[0]):
-                self.data = data_generator.sample_infonce(data_generator.user_pop_idx,data_generator.item_pop_idx)
+                self.data = data_generator.sample_cause()
+        
 
 class sample_thread_test(threading.Thread):
     def __init__(self,pop=0):
@@ -818,6 +981,8 @@ class train_thread(threading.Thread):
             sess_list = [self.model.opt_two_bce2, self.model.loss_two_bce2, self.model.mf_loss_two_bce2, self.model.emb_loss_two_bce2, self.model.reg_loss_two_bce2]
         elif args.loss == 'bceboth':
             sess_list = [self.model.opt_two_bce_both, self.model.loss_two_bce_both, self.model.mf_loss_two_bce_both, self.model.emb_loss_two_bce_both, self.model.reg_loss_two_bce_both]
+        elif args.loss == 'ipw':
+            sess_list = [self.model.opt_ipw, self.model.ipw_loss, self.model.ipw_mf_loss, self.model.ipw_reg_loss, self.model.reg_loss]
         elif args.loss == 'dyninfo':
             if self.args.freeze==1:
                 if self.epoch <= self.args.freeze_epoch:
@@ -828,24 +993,10 @@ class train_thread(threading.Thread):
                 sess_list = [self.model.opt_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
         elif args.loss == 'mf_info':
             sess_list = [self.model.opt_mf_info, self.model.loss_info, self.model.mf_loss_info_1, self.model.mf_loss_info_2, self.model.reg_loss_info]
+        elif args.loss == 'CausE':
+            sess_list = [self.model.opt_cause, self.model.loss_cause, self.model.cause_mf_loss, self.model.cause_cf_loss, self.model.cause_reg_loss]
 
-        if args.loss!="dyninfo" and args.loss!="mf_info":
-            if len(gpus):
-                with tf.device(gpus[-1]):
-                    users, pos_items, neg_items = self.sample.data
-                    self.data = sess.run(sess_list,
-                                        feed_dict={model.users: users, model.pos_items: pos_items,
-                                                    model.node_dropout: eval(args.node_dropout),
-                                                    model.mess_dropout: eval(args.mess_dropout),
-                                                    model.neg_items: neg_items})
-            else:
-                users, pos_items, neg_items = self.sample.data
-                self.data = sess.run(sess_list,
-                                        feed_dict={model.users: users, model.pos_items: pos_items,
-                                                    model.node_dropout: eval(args.node_dropout),
-                                                    model.mess_dropout: eval(args.mess_dropout),
-                                                    model.neg_items: neg_items})
-        else:
+        if args.loss=="dyninfo" or args.loss=="mf_info":
             if len(gpus):
                 with tf.device(gpus[-1]):
                     users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop = self.sample.data
@@ -868,6 +1019,45 @@ class train_thread(threading.Thread):
                                                     model.users_pop: users_pop,
                                                     model.pos_items_pop: pos_items_pop,
                                                     model.neg_items_pop: neg_items_pop})
+        elif args.loss=="CausE":
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items, all_items, ctrl_items = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.items: all_items,
+                                                    model.ctrl_items: ctrl_items})
+            else:
+                users, pos_items, neg_items, all_items, ctrl_items = self.sample.data
+                self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items,
+                                                    model.items: all_items,
+                                                    model.ctrl_items: ctrl_items})
+
+            
+        else:
+            if len(gpus):
+                with tf.device(gpus[-1]):
+                    users, pos_items, neg_items = self.sample.data
+                    self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items})
+            else:
+                users, pos_items, neg_items = self.sample.data
+                self.data = sess.run(sess_list,
+                                        feed_dict={model.users: users, model.pos_items: pos_items,
+                                                    model.node_dropout: eval(args.node_dropout),
+                                                    model.mess_dropout: eval(args.mess_dropout),
+                                                    model.neg_items: neg_items})
+            
 class train_thread_test(threading.Thread):
     def __init__(self, model, sess, sample, args):
         threading.Thread.__init__(self)
@@ -936,8 +1126,14 @@ def merge_user_list(user_lists):
             out[key]=out[key]+item
     return out
 
+def norm01(a):
+    return (a - np.min(a))/np.ptp(a)
+
 if __name__ == '__main__':
+    data=data_generator
     # os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    
+
     f0 = time()
     
     config = dict()
@@ -946,7 +1142,7 @@ if __name__ == '__main__':
 
     Ks=eval(args.Ks)
 
-    data=data_generator
+    
 
     if "new" in args.dataset:
         eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks,dump_dict=merge_user_list([data.train_user_list,data.valid_user_list,data.test_id_user_list]))
@@ -956,6 +1152,47 @@ if __name__ == '__main__':
         eval_test_ood = ProxyEvaluator(data,data.train_user_list,data.test_user_list,top_k=Ks)
         eval_test_id = None
         eval_valid = eval_test_ood
+
+    
+    p_matrix = dict()
+    p = []
+    pop = []
+    for item, users in data.train_item_list.items():
+        p_matrix[item] = len(users)+1
+    for item in data.items:
+        # print(item)
+        if item not in p_matrix.keys():
+            p_matrix[item] = 1
+        p.append(p_matrix[item]/(data.n_users+1))
+        pop.append(p_matrix[item]-1)
+
+    
+    p_user = np.array([len(data.train_user_list[u]) if u in data.train_user_list else 0 for u in range(data.n_users)])
+    # normal
+    
+    overlap_num=[10,20,30,40,50]
+    poptest=[{},{},{},{},{}]
+    p_all=np.array(pop)
+    _mean=np.mean(p_all)
+    _median=np.median(p_all)
+    _max=np.max(p_all)
+
+    print("distinct users pop:",len(np.unique(p_user)))
+    print("distinct items pop:",len(np.unique(p_all))-1)
+    print("distinct users:",len(p_user))
+    print("distinct items:",len(p_all))
+    print(_mean)
+    print(_median)
+    print(_max)
+    #exit()
+
+    #amazon:450 415
+
+    #yelp 327 396
+
+    #tencent:
+
+    #ifashion:
 
     """
     *********************************************************
@@ -987,7 +1224,7 @@ if __name__ == '__main__':
         pretrain_data = load_pretrained_data()
     else:
         pretrain_data = None
-    model = LightGCN(data_config=config, pretrain_data=pretrain_data,user_pop_num=data_generator.user_pop_num, item_pop_num=data_generator.item_pop_num,user_pop=data_generator.user_pop_idx, item_pop=data_generator.item_pop_idx, pop_branch=args.pop_branch, pop_reduct=args.pop_reduct)
+    model = LightGCN(data_config=config, pretrain_data=pretrain_data,user_pop_num=data_generator.user_pop_num, item_pop_num=data_generator.item_pop_num,user_pop=data_generator.user_pop_idx, item_pop=data_generator.item_pop_idx, pop_branch=args.pop_branch, pop_reduct=args.pop_reduct,p_matrix=p)
     model.add_sess(sess,args)
     
     """
@@ -996,12 +1233,12 @@ if __name__ == '__main__':
     """
     saver = tf.train.Saver()
 
-    if args.save_flag == 1:
-        layer = '-'.join([str(l) for l in eval(args.layer_size)])
-        weights_save_path = '%sweights/%s/%s/%s/l%s_r%s/' % (args.weights_path, args.dataset, model.model_type, layer,
-                                                            str(args.lr), '-'.join([str(r) for r in eval(args.regs)]))
-        ensureDir(weights_save_path)
-        save_saver = tf.train.Saver(max_to_keep=20000)
+    #if args.save_flag == 1:
+    layer = '-'.join([str(l) for l in eval(args.layer_size)])
+    weights_save_path = '%sweights/%s/%s/%s/l%s_r%s/' % (args.weights_path, args.dataset, model.model_type, layer,
+                                                        str(args.lr), '-'.join([str(r) for r in eval(args.regs)]))
+    ensureDir(weights_save_path)
+    save_saver = tf.train.Saver(max_to_keep=5)
 
     """
     *********************************************************
@@ -1010,7 +1247,57 @@ if __name__ == '__main__':
     
     if args.pretrain == 1:
 
+        p_user = np.array([len(data.train_user_list[u]) if u in data.train_user_list else 0 for u in range(data.n_users)])
         # normal
+        overlap_num=[10,20,30,40,50]
+        poptest=[{},{},{},{},{}]
+        p_all=np.array(pop)
+        _mean=np.mean(p_all)
+        _median=np.median(p_all)
+        _max=np.max(p_all)
+        print(_mean)
+        print(_median)
+        print(_max)
+        pop_sorted=np.sort(p_user)
+        n_groups=2
+        grp_view=[]
+        for grp in range(n_groups):
+            split=int((data.n_users-1)*(grp+1)/n_groups)
+            grp_view.append(pop_sorted[split])
+        print("group_view:",grp_view)
+        #12,12 [mean,median]
+        #42,15
+        #19,21
+        #12,3
+
+
+        # rank=np.argsort(-p_all)
+        # for user in range(data.n_users):
+        #     dump=[]
+        #     if user in data.train_user_list:
+        #         dump+=data.train_user_list[user]
+        #     if user in data.valid_user_list:
+        #         dump+=data.valid_user_list[user]
+
+        #     ptr=0
+        #     num=0
+        #     my_rank=[]
+        #     while num<50:
+        #         if rank[ptr] not in dump:
+        #             my_rank.append(rank[ptr])
+        #             num+=1
+        #         ptr+=1
+
+
+            
+        #     for i,num in enumerate(overlap_num):
+        #         poptest[i][user]=my_rank[:num]
+        
+
+        
+                
+        
+        
 
         # model_file = "../weights/addressa/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_gcnnormal-300"
         # users_to_test = list(data_generator.test_set.keys())
@@ -1022,22 +1309,159 @@ if __name__ == '__main__':
         # exit()
 
         # MACR
-        model_file = "Your Path"
-        best_c = 45 # value of c
-        users_to_test = list(data_generator.test_set.keys())
+       
+        #model_file = "/storage/wcma/MACR/weights/yelp2018.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_not_inbatch_neg64_final_70"
+        #model_file = "/storage/wcma/MACR/weights/yelp2018.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_infonce_final_rerun_466"
+        #model_file = "/storage/wcma/MACR/weights/yelp2018.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_inbatch_final_25"
+        #model_file="/storage/wcma/MACR/weights/yelp2018.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_112"
+        
+        #model_file = "/storage/wcma/MACR/weights/tencent.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_not_inbatch_neg64_final_108"
+        #model_file="/storage/wcma/MACR/weights/tencent.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_24"
+        #model_file="/storage/wcma/MACR/weights/tencent.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_infonce_final_rerun_278"
+        #model_file="/storage/wcma/MACR/weights/tencent.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_inbatch_final_109"
+        #model_file="/storage/wcma/MACR/weights/tencent.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_62"
+
+        #model_file = "/storage/wcma/MACR/weights/amazon-book.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_not_inbatch_neg64_final_84"
+        #model_file="/storage/wcma/MACR/weights/amazon-book.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_319"
+        #model_file="/storage/wcma/MACR/weights/amazon-book.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_infonce_final_rerun_92"
+        model_file="/storage/wcma/MACR/weights/amazon-book.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_180"
+        #model_file="/storage/wcma/MACR/weights/amazon-book.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_inbatch_final_25"
+
+
+        #model_file = "/storage/wcma/MACR/weights/ifashion.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_not_inbatch_neg64_final_204"
+        #model_file = "/storage/wcma/MACR/weights/ifashion.new/LightGCN/l0.001_r1e-05-1e-05-0.01/weights_mf_infonce_final_rerun_276"
+        #model_file="/storage/wcma/MACR/weights/ifashion.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_bpr_final_36"
+        #model_file = "/storage/wcma/MACR/weights/ifashion.new/LightGCN/64-64/l0.001_r1e-05-1e-05-0.01/weights_mf_popgo_inbatch_final_25"
+        # best_c = [30,50] # value of c
+        # users_to_test = list(data_generator.test_set.keys())
         saver.restore(sess, model_file)
-        for c in [0, best_c]:
-            model.update_c(sess, c)
-            ret = test(sess, model, users_to_test, method="rubiboth")
-            perf_str = 'c:{}: recall={}, hit={}, ndcg={}'.format(c, str(ret["recall"]),
-                                             str(ret['hr']), str(ret['ndcg']))
-            print(perf_str)
+
+        # for i,num in enumerate(overlap_num):
+        #     pop_eval=ProxyEvaluator(data,data.train_user_list,poptest[i],top_k=[num],dump_dict=merge_user_list([data.train_user_list,data.valid_user_list]),group_view=grp_view)
+        #     ret = pop_eval.evaluate(model)
+        #     print("Overlap@",num,":")
+        #     print(ret[:,1])
+
+        # test_users = list(self.test_user_list.keys())
+        # test_users = DataIterator(test_users, batch_size=args.batch_size, shuffle=False, drop_last=False)
+        # batch_result = []
+
+        method="infonce"
+        print("Calculating correlation with loss: ",method)
+        if args.loss!="dyninfo":
+            users = np.load(data_generator.path + '/users_'+method+'.npy')
+            pos_items = np.load(data_generator.path + '/pos_items_'+method+'.npy')
+            neg_items = np.load(data_generator.path + '/neg_items_'+method+'.npy')
+        else:
+            print("shit!")
+            users, pos_items, neg_items=data_generator.sample_infonce_test(data_generator.user_pop_idx,data_generator.item_pop_idx,method=method)
+            users=np.array(users)
+            pos_items=np.array(pos_items)
+            neg_items=np.array(neg_items)
+            np.save(data_generator.path + '/users_'+method+'.npy', users)
+            np.save(data_generator.path + '/pos_items_'+method+'.npy', pos_items)
+            np.save(data_generator.path + '/neg_items_'+method+'.npy', neg_items)
+
+        
+        data=model.get_score(users,pos_items,neg_items,loss=args.loss,method=method)
+        for i in range(len(data)):
+            data[i]=np.array(data[i])
+        
+        if args.loss=="dyninfo":
+
+            ensemble_pos_score,ensemble_neg_score,pop_pos_score,pop_neg_score,pos_score,neg_score=data
+            s_e=model.compute_loss_for_correlation(ensemble_pos_score,ensemble_neg_score,method)
+            s_o=model.compute_loss_for_correlation(pos_score,neg_score,method)
+            s_p=model.compute_loss_for_correlation(pop_pos_score,pop_neg_score,method)
+
+            
+
+            print("ensemble vs. pop(score):",np.corrcoef(norm01(ensemble_pos_score),norm01(pop_pos_score))[0,1])
+            print("debiased vs. pop(score):",np.corrcoef(norm01(pos_score),norm01(pop_pos_score))[0,1])
+            print("ensemble vs. pop:",np.corrcoef(s_e,s_p)[0,1])
+            print("debiased vs. pop:",np.corrcoef(s_o,s_p)[0,1])
+
+            np.save(data_generator.path + '/pop_pos_score_'+method+'.npy',pop_pos_score)
+            np.save(data_generator.path + '/pop_neg_score_'+method+'.npy',pop_neg_score)
+
+        else:
+            pop_pos_score=np.load(data_generator.path + '/pop_pos_score_'+method+'.npy')
+            pop_neg_score=np.load(data_generator.path + '/pop_neg_score_'+method+'.npy')
+            pos_score,neg_score=data
+
+            s_m=model.compute_loss_for_correlation(pos_score,neg_score,method)
+            s_p=model.compute_loss_for_correlation(pop_pos_score,pop_neg_score,method)
+
+            print("mf vs. pop(score):",np.corrcoef(norm01(pos_score),norm01(pop_pos_score))[0,1])
+            print("mf vs. pop:",np.corrcoef(s_m,s_p)[0,1])
+
+        
+        #print(self.pop_mask)
+
+
+        # items = list(range(model.n_items))
+        # item_embed,graph_embed,pop_embed=sess.run([model.weights['item_embedding'],model.pos_i_g_embeddings,model.pos_item_pop_embedding],
+        #                                                                                 {model.pos_items: items,
+        #                                                                                 model.node_dropout: [0.] * len(model.weight_size),
+        #                                                                                 model.mess_dropout: [0.] * len(model.weight_size)})
+        # pop=np.array(pop)
+        # print(np.array(item_embed).shape)
+        # np.save('tencent_infonce_embed.npy',np.array(item_embed))
+        
+        #np.save('tencent_pre_embed_info_lightgcn.npy',np.array(item_embed))
+        #np.save('tencent_graph_embed_info_lightgcn.npy',np.array(graph_embed))
+        #np.save('tencent_pop_embed_info_lightgcn.npy',np.array(pop_embed))
+        # np.save('tencent_pop.npy',pop)
+        #plot_tsne_embed(item_embed,pop)
+        # for c in best_c:
+        #     model.update_c(sess, c)
+        #     names=["valid","test_ood","test_id"]
+        #     test_trials=[eval_valid,eval_test_ood,eval_test_id]
+        #     for w,_eval in enumerate(test_trials):
+        #         ret, _ = _eval.evaluate(model)
+        #         t3 = time()
+        #         n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+        #         #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+        #         ret=n_ret
+
+        #         if args.verbose > 0:
+        #             perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
+        #                         'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+        #                         (c, ret['recall'][0], ret['recall'][-1],
+        #                             ret['hit_ratio'][0], ret['hit_ratio'][-1],
+        #                             ret['ndcg'][0], ret['ndcg'][-1])
+        #             print(perf_str)
+        #             with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+        #                 f.write(perf_str+"\n")
+        #             print(perf_str)
         exit()
 
     elif args.pretrain == 0:
         sess.run(tf.global_variables_initializer())
         cur_best_pre_0 = 0.
         print('without pretraining.')
+
+    
+    if args.loss=="most_pop":
+        model.set_method('most_pop')
+        names=["valid","test_ood","test_id"]
+        test_trials=[eval_valid,eval_test_ood,eval_test_id]
+        for w,_eval in enumerate(test_trials):
+            ret, _ = _eval.evaluate(model)
+            t3 = time()
+            n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+            #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+            ret=n_ret
+
+            if args.verbose > 0:
+                perf_str = '%s: recall=[%.5f, %.5f], ' \
+                            'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+                            (names[w], ret['recall'][0], ret['recall'][-1],
+                                ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                                ret['ndcg'][0], ret['ndcg'][-1])
+                print(perf_str)
+        exit()
+
 
     """
     *********************************************************
@@ -1065,11 +1489,20 @@ if __name__ == '__main__':
     best_epoch=0
     best_hr_norm = 0
     best_str = ''
+    
+    if args.loss=="dyninfo" or args.loss=="mf_info":
+        is_pop=1
+    elif args.loss=="CausE":
+        is_pop=2
+    else:
+        is_pop=0
 
-    is_pop = (args.loss=="dyninfo" or args.loss=="mf_info")
-    # if args.loss=="dyninfo":
-    #     model.set_method("pop")
-    # data_generator.check()
+    if args.loss!="dyninfo":
+        freeze = 0
+    else:
+        freeze = args.freeze_epoch
+        #model.set_method("pop")
+    data_generator.check()
     if args.only_test == 0 and args.pretrain == 0:
         for epoch in range(1, args.epoch +1):
             t1 = time()
@@ -1080,12 +1513,12 @@ if __name__ == '__main__':
             *********************************************************
             parallelized train sampling
             '''
-            sample_last = sample_thread(pop=is_pop)
+            sample_last = sample_thread(pop=is_pop,inbatch=args.inbatch_sample)
             sample_last.start()
             sample_last.join()
             for idx in tqdm(range(n_batch)):
                 train_cur = train_thread(model, sess, sample_last, args, epoch)
-                sample_next = sample_thread(pop=is_pop)
+                sample_next = sample_thread(pop=is_pop,inbatch=args.inbatch_sample)
                 
                 train_cur.start()
                 sample_next.start()
@@ -1113,7 +1546,7 @@ if __name__ == '__main__':
                     print(perf_str)
                 print('ERROR: loss is nan.')
                 sys.exit()
-            if (epoch % args.log_interval) != 0 or epoch <=args.freeze_epoch :
+            if (epoch % args.log_interval) != 0 or epoch <= freeze :
                 if args.verbose > 0 and epoch % args.verbose == 0:
                     perf_str = 'Epoch %d [%.1fs]: train==[%.5f=%.5f + %.5f + %.5f]' % (
                         epoch, time() - t1, loss, mf_loss, emb_loss, reg_loss)
@@ -1145,66 +1578,77 @@ if __name__ == '__main__':
                 best_c=0
                 for c in np.linspace(args.start, args.end, args.step):
                     model.update_c(sess, c)
-                    ret, _ = eval_valid.evaluate(model)
+                    if "new" in args.dataset: 
+                        names=["valid","test_ood","test_id"]
+                        test_trials=[eval_valid,eval_test_ood,eval_test_id]
+                    else:
+                        names=["valid"]
+                        test_trials=[eval_valid]
+
+                    for w,_eval in enumerate(test_trials):
+                        ret, _ = _eval.evaluate(model)
+                        t3 = time()
+
+                        n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                        #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
+                        ret=n_ret
+                        if w==0:
+                            rec_loger.append(ret['recall'][0])
+                            ndcg_loger.append(ret['ndcg'][0])
+                            hit_loger.append(ret['hit_ratio'][0])
+
+                            if ret['hit_ratio'][0] > best_hr:
+                                best_hr = ret['hit_ratio'][0]
+                                best_c = c
+
+                        if args.verbose > 0:
+                            perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
+                                        'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+                                        (c, ret['recall'][0], ret['recall'][-1],
+                                            ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                                            ret['ndcg'][0], ret['ndcg'][-1])
+                            print(perf_str)
+                            with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
+                                f.write(perf_str+"\n")
+                model.update_c(sess, best_c)
+            
+            else:
+                if "new" in args.dataset: 
+                    names=["valid","test_ood","test_id"]
+                    test_trials=[eval_valid,eval_test_ood,eval_test_id]
+                else:
+                    names=["valid"]
+                    test_trials=[eval_valid]
+                
+
+                for w,_eval in enumerate(test_trials):
+                    ret, _ = _eval.evaluate(model)
                     t3 = time()
 
                     n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
                     #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
                     ret=n_ret
-                    rec_loger.append(ret['recall'][0])
-                    ndcg_loger.append(ret['ndcg'][0])
-                    hit_loger.append(ret['hit_ratio'][0])
+                    if w==0:
+                        rec_loger.append(ret['recall'][0])
+                        pre_loger.append(ret['precision'][0])
+                        ndcg_loger.append(ret['ndcg'][0])
+                        hit_loger.append(ret['hit_ratio'][0])
 
-                    if ret['hit_ratio'][0] > best_hr:
+                        
                         best_hr = ret['hit_ratio'][0]
-                        best_c = c
+                        best_recall=ret['recall'][0]
+                        best_pre=ret['precision'][0]
+                        best_ndcg=ret['ndcg'][0]
 
                     if args.verbose > 0:
-                        perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
-                                    'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
-                                    (c, ret['recall'][0], ret['recall'][-1],
-                                        ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                        ret['ndcg'][0], ret['ndcg'][-1])
+                        perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.5f=%.5f + %.5f + %.5f], split=[%s], recall=[%.5f, %.5f], ' \
+                            'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
+                            (epoch, t2 - t1, t3 - t2, loss, mf_loss, emb_loss, reg_loss, names[w], ret['recall'][0], ret['recall'][-1],
+                                ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                                ret['ndcg'][0], ret['ndcg'][-1])
                         print(perf_str)
                         with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                             f.write(perf_str+"\n")
-                model.update_c(sess, best_c)
-
-            if "new" in args.dataset: 
-                names=["valid","test_ood","test_id"]
-                test_trials=[eval_valid,eval_test_ood,eval_test_id]
-            else:
-                names=["valid"]
-                test_trials=[eval_valid]
-
-            for w,_eval in enumerate(test_trials):
-                ret, _ = _eval.evaluate(model)
-                t3 = time()
-
-                n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
-                #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
-                ret=n_ret
-                if w==0:
-                    rec_loger.append(ret['recall'][0])
-                    pre_loger.append(ret['precision'][0])
-                    ndcg_loger.append(ret['ndcg'][0])
-                    hit_loger.append(ret['hit_ratio'][0])
-
-                    
-                    best_hr = ret['hit_ratio'][0]
-                    best_recall=ret['recall'][0]
-                    best_pre=ret['precision'][0]
-                    best_ndcg=ret['ndcg'][0]
-
-                if args.verbose > 0:
-                    perf_str = 'Epoch %d [%.1fs + %.1fs]: train==[%.5f=%.5f + %.5f + %.5f], split=[%s], recall=[%.5f, %.5f], ' \
-                        'precision=[%.5f, %.5f], hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]' % \
-                        (epoch, t2 - t1, t3 - t2, loss, mf_loss, emb_loss, reg_loss, names[w], ret['recall'][0], ret['recall'][-1],
-                            ret['precision'][0], ret['precision'][-1], ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                            ret['ndcg'][0], ret['ndcg'][-1])
-                    print(perf_str)
-                    with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
-                        f.write(perf_str+"\n")
                 
                 
             # ret, _ = eval_valid.evaluate(model)
@@ -1351,21 +1795,20 @@ if __name__ == '__main__':
 
             
                 
-            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['hit_ratio'][0], cur_best_pre_0,
-                                                                        stopping_step, expected_order='acc', flag_step=10)
+            cur_best_pre_0, stopping_step, should_stop = early_stopping(ret['ndcg'][0], cur_best_pre_0,
+                                                                        stopping_step, expected_order='acc', flag_step=100)
 
             # *********************************************************
             # save the user & item embeddings for pretraining.
-            if ret['hit_ratio'][0] == cur_best_pre_0:
+            if ret['ndcg'][0] == cur_best_pre_0:
                 best_epoch = epoch
                 if args.test!="normal":
                     config['best_c']=best_c
             if args.save_flag == 1:
-                save_saver.save(sess, weights_save_path + 'weights_{}_{}'.format(args.saveID, epoch))
-                print('save the weights in path: ', weights_save_path)
                 if best_epoch==epoch:
+                    print('save the weights in path: ', weights_save_path)
+                    save_saver.save(sess, weights_save_path + 'weights_{}_{}'.format(args.saveID, epoch))
                     config['best_name']=weights_save_path + 'weights_{}_{}'.format(args.saveID, epoch)
-            
             # *********************************************************
             # early stopping when cur_best_pre_0 is decreasing for ten successive steps.
             if should_stop == True and args.early_stop == 1:
@@ -1381,7 +1824,8 @@ if __name__ == '__main__':
         
 
         saver.restore(sess, config['best_name'])
-        model.update_c(sess, config['best_c'])
+        if args.test!='normal':
+            model.update_c(sess, config['best_c'])
         
         ret, _ = eval_test_ood.evaluate(model)
         n_ret = {"recall":ret[1], "hit_ratio":ret[5], "precision":ret[0], "ndcg":ret[4]}

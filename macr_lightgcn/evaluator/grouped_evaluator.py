@@ -21,8 +21,8 @@ class GroupedEvaluator(AbstractEvaluator):
     users whose interacted items more than `100` will be discard.
     """
     @typeassert(user_train_dict=dict, user_test_dict=dict, group_view=list)
-    def __init__(self, user_train_dict, user_test_dict, user_neg_test=None,
-                 metric=None, group_view=None, top_k=50, batch_size=1024, num_thread=8):
+    def __init__(self, dataset,user_train_dict, user_test_dict, user_neg_test=None,
+                 metric=None, group_view=None, top_k=50, batch_size=1024, num_thread=8,dump_dict=None):
         """Initializes a new `GroupedEvaluator` instance.
 
         Args:
@@ -53,10 +53,10 @@ class GroupedEvaluator(AbstractEvaluator):
         if not isinstance(group_view, list):
             raise TypeError("The type of 'group_view' must be `list`!")
 
-        self.evaluator = UniEvaluator(user_train_dict, user_test_dict, user_neg_test,
+        self.evaluator = UniEvaluator(dataset,user_train_dict, user_test_dict, user_neg_test,
                                       metric=metric, top_k=top_k,
                                       batch_size=batch_size,
-                                      num_thread=num_thread)
+                                      num_thread=num_thread,dump_dict=dump_dict)
         self.user_pos_train = user_train_dict
         self.user_pos_test = user_test_dict
 
@@ -104,9 +104,12 @@ class GroupedEvaluator(AbstractEvaluator):
                 (30,50]:  0.00653595   0.00326797   0.00217865   0.00163399\n
                 (50,100]: 0.00423729   0.00211864   0.00141243   0.00105932"`
         """
-        result_to_show = ""
+        result_to_show = []
         for group, users in self.grouped_user.items():
-            tmp_result = self.evaluator.evaluate(model, users)
-            result_to_show = "%s\n%s\t%s" % (result_to_show, group, tmp_result)
+            #print(users[:10])
+            tmp_result, _buf = self.evaluator.evaluate(model, users)
+            result_to_show.append(tmp_result)
+        result_to_show = np.stack(result_to_show)
+        #result_to_show = "%s\n%s\t%s" % (result_to_show, group, tmp_result)
 
         return result_to_show

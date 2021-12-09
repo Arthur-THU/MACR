@@ -1,5 +1,6 @@
 import numpy as np
 import random as rd
+from scipy.optimize.optimize import main
 import scipy.sparse as sp
 from time import time
 import json
@@ -9,6 +10,7 @@ import heapq
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 import scipy.sparse as sp
+
 
 
 plt.switch_backend('agg')
@@ -140,6 +142,8 @@ class Data():
 
                 print('test_id')
                 print(max(self.test_id_user_list.keys()) + 1)
+            
+
 
             
 
@@ -165,6 +169,7 @@ class Data():
             #     self.n_valid += len(self.valid_user_list[i])
         pop_user={key:len(value) for key,value in self.train_user_list.items()}
         pop_item={key:len(value) for key,value in self.train_item_list.items()}
+        self.pop_item=pop_item
         sorted_pop_user=list(set(list(pop_user.values())))
         sorted_pop_item=list(set(list(pop_item.values())))
         sorted_pop_user.sort()
@@ -590,6 +595,38 @@ class Data():
 
         return users, pos_items, neg_items
 
+    def sample_cause(self):
+        if self.batch_size <= self.n_users:
+            users = rd.sample(self.users, self.batch_size)
+        else:
+            users = [rd.choice(self.users) for _ in range(self.batch_size)]
+
+        pos_items, neg_items = [], []
+
+        for user in users:
+            if self.train_user_list[user] == []:
+                pos_items.append(0)
+            else:
+                item=rd.choice(self.train_user_list[user])
+                weight=0.1*self.n_train/len(self.pop_item)/self.pop_item[item]
+                if weight>=1:
+                    weight=0.5
+                rad=rd.random()
+                if rad<weight:
+                    item=item+self.n_items
+                pos_items.append(item)
+            while True:
+                neg_item = rd.choice(self.items)
+                if neg_item not in self.train_user_list[user]:
+                    neg_items.append(neg_item)
+                    break
+
+        for i in range(len(users)):
+            if pos_items[i] >= self.n_items:
+                neg_items[i] += self.n_items
+
+        return users, pos_items, neg_items
+
     def sample2(self):
         if self.batch_size <= len(self.valid_users):
             users = rd.sample(self.valid_users, self.batch_size)
@@ -655,18 +692,18 @@ class Data():
             else:
                 pos_items.append(rd.choice(self.train_user_list[user]))
             cnt=0
-            while True:
-                neg_item = rd.choice(self.items)
-                if neg_item not in self.train_user_list[user]:
-                    neg_items.append(neg_item)
-                    cnt+=1
-                    if cnt==self.neg_sample:
-                        break
+            # while True:
+            #     neg_item = rd.choice(self.items)
+            #     if neg_item not in self.train_user_list[user]:
+            #         neg_items.append(neg_item)
+            #         cnt+=1
+            #         if cnt==self.neg_sample:
+            #             break
 
-        for i in range(len(users)):
-            if pos_items[i] >= self.n_items:
-                for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
-                    neg_items[p] += self.n_items
+        # for i in range(len(users)):
+        #     if pos_items[i] >= self.n_items:
+        #         for p in range(self.neg_sample*i,self.neg_sample*(i+1)):
+        #             neg_items[p] += self.n_items
         
 
         for item in pos_items:
@@ -674,11 +711,21 @@ class Data():
                 pos_items_pop.append(item_pop_idx[item])
             else:
                 pos_items_pop.append(0)
+
         
-        for item in neg_items:
-            if item in item_pop_idx:
-                neg_items_pop.append(item_pop_idx[item])
-            else:
-                neg_items_pop.append(0)
+        pos_items=np.array(pos_items)
+        pos_items_pop=np.array(pos_items_pop)
+
+        neg_items=np.tile(pos_items,(pos_items.shape[0],1))
+        neg_items_pop=np.tile(pos_items_pop,(pos_items_pop.shape[0],1))
+
+        neg_items=np.reshape(neg_items[~np.eye(neg_items.shape[0],dtype=bool)],-1)
+        neg_items_pop=np.reshape(neg_items_pop[~np.eye(neg_items_pop.shape[0],dtype=bool)],-1)
+        
+        # for item in neg_items:
+        #     if item in item_pop_idx:
+        #         neg_items_pop.append(item_pop_idx[item])
+        #     else:
+        #         neg_items_pop.append(0)
 
         return users, pos_items, neg_items, users_pop, pos_items_pop, neg_items_pop
