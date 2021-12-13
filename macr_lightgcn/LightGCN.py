@@ -1576,7 +1576,8 @@ if __name__ == '__main__':
             if args.test=="rubiboth":
                 best_hr=0
                 best_c=0
-                for c in np.linspace(args.start, args.end, args.step):
+                for c in range(args.start, args.end, args.step):
+
                     model.update_c(sess, c)
                     if "new" in args.dataset: 
                         names=["valid","test_ood","test_id"]
@@ -1589,7 +1590,9 @@ if __name__ == '__main__':
                         ret, _ = _eval.evaluate(model)
                         t3 = time()
 
-                        n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
+                        n_ret = {"recall": [ret[1]], "hit_ratio": [ret[5]], "precision": [ret[0]], "ndcg": [ret[3]], "mrr":[ret[4]], "map":[ret[2]]}
+
+                        #n_ret={"recall":[ret[1],ret[1]],"hit_ratio":[ret[5],ret[5]],"precision":[ret[0],ret[0]],"ndcg":[ret[4],ret[4]]}
                         #["Precision", "Recall", "MAP", "NDCG", "MRR", "HR"]
                         ret=n_ret
                         if w==0:
@@ -1602,11 +1605,12 @@ if __name__ == '__main__':
                                 best_c = c
 
                         if args.verbose > 0:
-                            perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
-                                        'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
-                                        (c, ret['recall'][0], ret['recall'][-1],
-                                            ret['hit_ratio'][0], ret['hit_ratio'][-1],
-                                            ret['ndcg'][0], ret['ndcg'][-1])
+                            perf_str = '{}, c:'.format(names[w])+str(c)+':{}'.format(n_ret)
+                            # #perf_str = 'c:%.2f recall=[%.5f, %.5f], ' \
+                            #             'hit=[%.5f, %.5f], ndcg=[%.5f, %.5f]\n' % \
+                            #             (c, ret['recall'][0], ret['recall'][-1],
+                            #                 ret['hit_ratio'][0], ret['hit_ratio'][-1],
+                            #                 ret['ndcg'][0], ret['ndcg'][-1])
                             print(perf_str)
                             with open(weights_save_path + 'stats_{}.txt'.format(args.saveID),'a') as f:
                                 f.write(perf_str+"\n")
